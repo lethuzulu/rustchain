@@ -23,7 +23,7 @@ libp2p = { version = "0.55", features = ["tcp", "dns", "noise", "gossipsub", "ya
 tokio = "1.45.0"
 
 # command line 
-clap = "4.5.38"
+clap = { version = "4.5.38", features = ["derive"] }
 
 # config parsing 
 config = "0.15.11"
