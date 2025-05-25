@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
+use bincode::Encode;
 use std::fmt;
 
 /// Represents a 32-byte SHA-256 hash.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Encode, bincode::Decode)]
 pub struct Hash(pub [u8; 32]);
 
 impl fmt::Debug for Hash {
@@ -60,7 +61,15 @@ impl AsRef<[u8]> for PublicKey {
     }
 }
 
-
+// Manual implementation of Encode for PublicKey
+impl Encode for PublicKey {
+    fn encode<E: bincode::enc::Encoder>(
+        &self,
+        encoder: &mut E,
+    ) -> Result<(), bincode::error::EncodeError> {
+        self.0.as_bytes().encode(encoder)
+    }
+}
 
 /// Represents an Ed25519 signature
 /// New type wrapper for ed25519::Signature
@@ -81,6 +90,15 @@ impl fmt::Display for Signature {
     }
 }
 
+// Manual implementation of Encode for Signature
+impl Encode for Signature {
+    fn encode<E: bincode::enc::Encoder>(
+        &self,
+        encoder: &mut E,
+    ) -> Result<(), bincode::error::EncodeError> {
+        self.0.to_bytes().encode(encoder)
+    }
+}
 
 // --- Address ---
 
@@ -90,7 +108,7 @@ impl fmt::Display for Signature {
 /// Let's assume it's 32 bytes for now, similar to a hash.
 /// (Alternatively, it could be derived from a PublicKey and be ~32 bytes if it's a hash of the PK,
 /// or if we use the PK bytes directly, it would be the size of the PK).
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Encode, bincode::Decode)]
 pub struct Address(pub [u8; 32]); // Assuming 32 bytes for now, e.g., a hash of a public key.
 
 impl fmt::Debug for Address {
@@ -128,7 +146,7 @@ impl From<[u8; 32]> for Address {
 
 
 /// Represents the height of a block in the blockchain (sequential number).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default, Encode, bincode::Decode)]
 pub struct BlockHeight(pub u64);
 
 impl fmt::Display for BlockHeight {
@@ -150,7 +168,7 @@ impl Into<u64> for BlockHeight {
 }
 
 /// Represents a Unix timestamp (seconds since epoch).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default, Encode, bincode::Decode)]
 pub struct Timestamp(pub u64);
 
 impl fmt::Display for Timestamp {
@@ -174,7 +192,7 @@ impl Into<u64> for Timestamp {
 }
 
 /// Represents an account nonce for transaction ordering and replay protection.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default, Encode, bincode::Decode)]
 pub struct Nonce(pub u64);
 
 impl fmt::Display for Nonce {
@@ -242,7 +260,6 @@ mod tests {
 
         // Placeholder for Address derivation
         // For now, let's just create a dummy address from the public key's bytes (first 32 bytes)
-        // In a real scenario, you'd hash the public key.
         let pk_bytes = public_key_val.0.as_bytes();
         let mut address_bytes = [0u8; 32]; 
         // This is a simplification; if pk_bytes is shorter than 32, this will panic.

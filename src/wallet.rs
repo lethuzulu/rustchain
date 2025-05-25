@@ -1,11 +1,15 @@
-use crate::types::{Address, PublicKey, Signature}; // Assuming Signature might be needed later for signing context
+use crate::types::{Address, PublicKey, Signature, Nonce, Hash};
+use crate::transaction::Transaction;
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey, SECRET_KEY_LENGTH, PUBLIC_KEY_LENGTH};
-use rand::rngs::OsRng; // Cryptographically secure random number generator
-use sha2::{Sha256, Digest}; // For hashing public key to address if needed, though we'll start direct
+use rand::rngs::OsRng; 
+use sha2::{Sha256, Digest}; 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::Path;
-use anyhow::Context; // Added for .context() method
+use anyhow::Context; 
+use bincode::config::{self, Config}; 
+use bincode::Encode; 
+use serde; 
 
 /// Represents a wallet, holding a keypair.
 /// For simplicity, we'll store the secret key directly.
@@ -95,16 +99,59 @@ impl Wallet {
         Ok(Wallet::from_signing_key(signing_key))
     }
 
-    // TODO: Add methods for:
-    // - Creating and signing a Transaction struct
+    /// Creates and signs a transaction.
+    pub fn create_signed_transaction(
+        &self,
+        recipient: Address,
+        amount: u64,
+        nonce: Nonce,
+    ) -> anyhow::Result<Transaction> {
+        #[derive(serde::Serialize, bincode::Encode)]
+        struct TransactionPayload<'a> {
+            sender: &'a Address,
+            recipient: &'a Address,
+            amount: u64,
+            nonce: &'a Nonce,
+        }
+
+        let payload = TransactionPayload {
+            sender: &self.address,
+            recipient: &recipient,
+            amount,
+            nonce: &nonce,
+        };
+
+        let config = bincode::config::standard();
+        let serialized_payload = bincode::encode_to_vec(&payload, config)
+            .context("Failed to serialize transaction payload for signing")?;
+
+        let mut hasher = Sha256::new();
+        hasher.update(&serialized_payload);
+        let message_hash: [u8; 32] = hasher.finalize().into();
+
+        let signature = self.sign(&message_hash)
+            .context("Failed to sign transaction payload hash")?;
+
+        let transaction = Transaction {
+            sender: self.address,
+            recipient,
+            amount,
+            nonce,
+            signature,
+        };
+
+        Ok(transaction)
+    }
 }
 
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::Nonce; // Explicit import for test
     use std::fs;
     use tempfile::NamedTempFile;
+    use bincode; // Ensure bincode is in scope for tests as well
 
     #[test]
     fn generate_new_wallet() {
@@ -193,6 +240,61 @@ mod tests {
         } else {
             panic!("Test should have resulted in an error.");
         }
+        Ok(())
+    }
+
+    #[test]
+    fn create_and_sign_transaction() -> anyhow::Result<()> {
+        let wallet = Wallet::new();
+        let recipient_wallet = Wallet::new(); // Create a dummy recipient
+
+        let amount = 100u64;
+        let nonce_val = 1u64;
+        let nonce = Nonce(nonce_val);
+
+        let transaction = wallet.create_signed_transaction(
+            recipient_wallet.address, 
+            amount, 
+            nonce
+        )?;
+
+        assert_eq!(transaction.sender, wallet.address);
+        assert_eq!(transaction.recipient, recipient_wallet.address);
+        assert_eq!(transaction.amount, amount);
+        assert_eq!(transaction.nonce, nonce);
+
+        // Verify the signature
+        // Reconstruct the signed payload and hash it
+        #[derive(serde::Serialize, bincode::Encode)]
+        struct TestTransactionPayload<'a> {
+            sender: &'a Address,
+            recipient: &'a Address,
+            amount: u64,
+            nonce: &'a Nonce,
+        }
+        let test_payload = TestTransactionPayload {
+            sender: &transaction.sender,
+            recipient: &transaction.recipient,
+            amount: transaction.amount,
+            nonce: &transaction.nonce,
+        };
+        
+        // Update serialization in test to match bincode 2.x API
+        let config = bincode::config::standard();
+        let serialized_test_payload = bincode::encode_to_vec(&test_payload, config)?;
+        
+        let mut hasher = Sha256::new();
+        hasher.update(&serialized_test_payload);
+        let message_hash_for_verification: [u8; 32] = hasher.finalize().into();
+        
+        let verification_result = wallet.public_key().0.verify_strict(
+            &message_hash_for_verification, 
+            &transaction.signature.0
+        );
+        assert!(verification_result.is_ok(), "Transaction signature verification failed");
+
+        println!("Transaction created and signed successfully:
+{:?}", transaction);
         Ok(())
     }
 } 

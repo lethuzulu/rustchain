@@ -1,7 +1,8 @@
 use serde::{Serialize, Deserialize};
 use crate::types::{Address, Signature, Nonce, Hash};
+use bincode::{Encode, Decode};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Encode)]
 pub struct Transaction {
     pub sender: Address,
     pub recipient: Address,

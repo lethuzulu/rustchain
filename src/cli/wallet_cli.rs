@@ -1,33 +1,32 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
-use rustchain::wallet::Wallet;
-use rustchain::types::{Address, Nonce}; // For parsing arguments
-use bincode; // For serializing the final transaction for display
+use rustchain::wallet::Wallet; // Changed from rustchain::wallet
+use rustchain::types::{Address, Nonce};
+use bincode;
+use anyhow;
+use hex; // Added hex import
 
-// This brings the cli module into scope, which exports wallet_cli.
-// wallet_cli, in turn, exports its own Cli and Commands structs.
-mod cli;
-
+// Main CLI structure if this module handles the entire `rustchain` command.
+// If `main.rs` has its own top-level Commands (e.g. for `node` vs `wallet`),
+// then this Cli/Commands might be simplified or adjusted.
 #[derive(Parser, Debug)]
-#[clap(author, version, about, long_about = None)]
+#[clap(author, version, about = "RustChain CLI utility", long_about = None)]
 #[clap(propagate_version = true)]
-struct Cli {
+pub struct Cli {
     #[clap(subcommand)]
-    command: Commands,
+    pub command: Commands,
 }
 
 #[derive(Subcommand, Debug)]
-enum Commands {
+pub enum Commands {
     /// Manage wallets (generate, show, send)
-    #[clap(name = "wallet")] // Ensure the command is still 'wallet'
-    WalletCmd(cli::wallet_cli::WalletCliArgs),
-
-    // Placeholder for other top-level commands like `node run` etc.
-    // Node(NodeArgs),
+    #[clap(name = "wallet")] // Use a specific name for the subcommand if desired
+    Wallet(WalletCliArgs),
+    // Add other top-level commands like `node` here if this is the main CLI parser
 }
 
 #[derive(Parser, Debug)]
-struct WalletArgs {
+pub struct WalletCliArgs { // This struct now holds the sub-actions for the `wallet` command
     #[clap(subcommand)]
     action: WalletAction,
 }
@@ -75,26 +74,6 @@ enum WalletAction {
     },
 }
 
-fn main() -> anyhow::Result<()> {
-    // Parse the arguments using the Cli struct defined in cli::wallet_cli.rs
-    let top_level_cli = cli::wallet_cli::Cli::parse(); // Using clap::Parser from wallet_cli
-
-    // The Cli struct in wallet_cli.rs has a `command: Commands` field.
-    // And Commands has a `Wallet(WalletCliArgs)` variant.
-    // We will dispatch based on this top-level command.
-    match top_level_cli.command {
-        cli::wallet_cli::Commands::Wallet(wallet_cli_args) => {
-            cli::wallet_cli::run_wallet_cli(wallet_cli_args)?;
-        }
-        // If other top-level commands were added to cli::wallet_cli::Commands,
-        // they would be handled here.
-    }
-
-    Ok(())
-}
-
-// --- Wallet Command Handlers ---
-
 const DEFAULT_KEY_FILE: &str = "default_wallet.key";
 
 fn handle_generate_wallet(keyfile_opt: &Option<PathBuf>) -> anyhow::Result<()> {
@@ -130,7 +109,7 @@ fn handle_show_wallet(keyfile_opt: &Option<PathBuf>) -> anyhow::Result<()> {
 fn handle_send_transaction(
     to: &Address, 
     amount: u64, 
-    nonce: Nonce, 
+    nonce_val: u64, 
     keyfile_opt: &Option<PathBuf>
 ) -> anyhow::Result<()> {
     let keyfile_path = keyfile_opt.clone().unwrap_or_else(|| PathBuf::from(DEFAULT_KEY_FILE));
@@ -146,6 +125,8 @@ fn handle_send_transaction(
     let wallet = Wallet::load_from_file(keyfile_path.to_str().unwrap_or(DEFAULT_KEY_FILE))
         .map_err(|e| anyhow::anyhow!("Failed to load wallet for sending: {}", e))?;
     
+    let nonce = Nonce(nonce_val);
+
     println!("Creating transaction...");
     println!("  Sender (from keyfile): {}", wallet.address());
     println!("  Recipient: {}", to);
@@ -162,7 +143,6 @@ fn handle_send_transaction(
     println!("  Nonce: {}", transaction.nonce.0);
     println!("  Signature: {}", transaction.signature);
 
-    // Serialize the full transaction for output (e.g., to be broadcasted later)
     let config = bincode::config::standard();
     let serialized_tx = bincode::encode_to_vec(&transaction, config)
         .map_err(|e| anyhow::anyhow!("Failed to serialize final transaction: {}", e))?;
@@ -173,7 +153,18 @@ fn handle_send_transaction(
     Ok(())
 }
 
-// TODO:
-// - Implement `wallet send` command and its handler
-// - Add actual transaction creation and signing logic
-// - Integrate with a node for balance queries and transaction submission for `send`
+/// Main entry point for wallet CLI commands
+pub fn run_wallet_cli(cli_args: WalletCliArgs) -> anyhow::Result<()> {
+    match &cli_args.action {
+        WalletAction::Generate { keyfile } => {
+            handle_generate_wallet(keyfile)?;
+        }
+        WalletAction::Show { keyfile } => {
+            handle_show_wallet(keyfile)?;
+        }
+        WalletAction::Send { to, amount, nonce, keyfile } => {
+            handle_send_transaction(to, *amount, *nonce, keyfile)?;
+        }
+    }
+    Ok(())
+} 
