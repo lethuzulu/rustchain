@@ -2357,6 +2357,7 @@ dependencies = [
 name = "rustchain"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "bincode",
  "clap",
  "config",
@@ -2368,6 +2369,7 @@ dependencies = [
  "serde",
  "serde_derive",
  "sha2",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
