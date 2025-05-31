@@ -2383,6 +2383,7 @@ dependencies = [
  "serde_derive",
  "sha2",
  "tempfile",
+ "thiserror 1.0.69",
  "tokio",
  "tracing",
  "tracing-subscriber",

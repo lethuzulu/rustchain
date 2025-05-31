@@ -1,9 +1,10 @@
 use serde::{Deserialize, Serialize};
-use bincode::Encode;
+use bincode::{Encode, config};
+use bincode::enc::Encoder;
 use std::fmt;
 
 /// Represents a 32-byte SHA-256 hash.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Encode, bincode::Decode)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Encode)]
 pub struct Hash(pub [u8; 32]);
 
 impl fmt::Debug for Hash {
@@ -61,9 +62,8 @@ impl AsRef<[u8]> for PublicKey {
     }
 }
 
-// Manual implementation of Encode for PublicKey
 impl Encode for PublicKey {
-    fn encode<E: bincode::enc::Encoder>(
+    fn encode<E: Encoder>(
         &self,
         encoder: &mut E,
     ) -> Result<(), bincode::error::EncodeError> {
@@ -90,9 +90,8 @@ impl fmt::Display for Signature {
     }
 }
 
-// Manual implementation of Encode for Signature
 impl Encode for Signature {
-    fn encode<E: bincode::enc::Encoder>(
+    fn encode<E: Encoder>(
         &self,
         encoder: &mut E,
     ) -> Result<(), bincode::error::EncodeError> {
@@ -108,7 +107,7 @@ impl Encode for Signature {
 /// Let's assume it's 32 bytes for now, similar to a hash.
 /// (Alternatively, it could be derived from a PublicKey and be ~32 bytes if it's a hash of the PK,
 /// or if we use the PK bytes directly, it would be the size of the PK).
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Encode, bincode::Decode)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Encode)]
 pub struct Address(pub [u8; 32]); // Assuming 32 bytes for now, e.g., a hash of a public key.
 
 impl fmt::Debug for Address {
@@ -146,7 +145,7 @@ impl From<[u8; 32]> for Address {
 
 
 /// Represents the height of a block in the blockchain (sequential number).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default, Encode, bincode::Decode)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default, Encode)]
 pub struct BlockHeight(pub u64);
 
 impl fmt::Display for BlockHeight {
@@ -168,7 +167,7 @@ impl Into<u64> for BlockHeight {
 }
 
 /// Represents a Unix timestamp (seconds since epoch).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default, Encode, bincode::Decode)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default, Encode)]
 pub struct Timestamp(pub u64);
 
 impl fmt::Display for Timestamp {
@@ -192,7 +191,7 @@ impl Into<u64> for Timestamp {
 }
 
 /// Represents an account nonce for transaction ordering and replay protection.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default, Encode, bincode::Decode)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default, Encode)]
 pub struct Nonce(pub u64);
 
 impl fmt::Display for Nonce {
