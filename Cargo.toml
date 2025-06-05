@@ -17,10 +17,10 @@ rand = "0.8.5"
 hex = "0.4.3"
 
 # networking
-libp2p = { version = "0.55", features = ["tcp", "dns", "noise", "gossipsub", "yamux"] }
+libp2p = { version = "0.55", features = ["tcp", "dns", "noise", "gossipsub", "yamux", "mdns"] }
 
 # async runtime
-tokio = "1.45.0"
+tokio = { version = "1.45.0", features = ["full"] }
 
 # command line 
 clap = { version = "4.5.38", features = ["derive"] }
