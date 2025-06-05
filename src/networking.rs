@@ -108,6 +108,7 @@ pub struct NetworkService {
     incoming_message_sender: mpsc::Sender<NetworkMessage>,
     transaction_topic: Topic,
     block_topic: Topic,
+    config: NetworkConfig,
 }
 
 // Placeholder for NetworkCommand enum (commands sent to the NetworkService event loop)
@@ -178,6 +179,7 @@ impl NetworkService {
             incoming_message_sender,
             transaction_topic,
             block_topic,
+            config: config_arg,
         };
 
         Ok((service, command_sender))
@@ -188,10 +190,127 @@ impl NetworkService {
         self.command_sender.clone()
     }
 
-    // Placeholder for the event loop and other methods
-    // pub async fn run(self) { ... }
-    // pub fn broadcast_transaction(&self, transaction: Transaction) { ... }
-    // pub fn broadcast_block(&self, block: Block) { ... }
+    /// Runs the NetworkService event loop.
+    pub async fn run(mut self) -> Result<(), NetworkError> {
+        // Start listening on the configured address.
+        self.swarm.listen_on(self.config.listen_address.clone())
+            .map_err(|e| NetworkError::ListenError(format!("Listen on address failed: {:?}", e)))?;
+
+        // Dial bootstrap peers if any are configured.
+        for addr in &self.config.bootstrap_peers {
+            match self.swarm.dial(addr.clone()) {
+                Ok(_) => info!("Dialing bootstrap peer: {}", addr),
+                Err(e) => warn!("Failed to dial bootstrap peer {}: {:?}", addr, e),
+            }
+        }
+
+        loop {
+            tokio::select! {
+                // Event from the Swarm
+                event = self.swarm.select_next_some() => {
+                    match event {
+                        SwarmEvent::NewListenAddr { address, .. } => {
+                            info!("Node listening on: {}", address);
+                        }
+                        SwarmEvent::Behaviour(RustchainNetworkEvent::Gossipsub(gossipsub::Event::Message {
+                            propagation_source, // peer_id of the peer that sent us this message
+                            message_id,         // id of the message
+                            message,            // the actual message
+                        })) => {
+                            let msg_topic = message.topic.to_string();
+                            debug!("Received gossip message with id: {} from peer: {} on topic: {}", 
+                                   message_id, propagation_source, msg_topic);
+                            match bincode::decode_from_slice(&message.data, config::standard()) {
+                                Ok((network_message, _)) => {
+                                    if let Err(e) = self.incoming_message_sender.send(network_message).await {
+                                        error!("Failed to send decoded message to handler: {}", e);
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!("Failed to deserialize gossip message: {}. Data: {:?}", e, message.data);
+                                }
+                            }
+                        }
+                        SwarmEvent::Behaviour(RustchainNetworkEvent::Mdns(mdns::Event::Discovered { list })) => {
+                            for (peer_id, multiaddr) in list {
+                                info!("mDNS discovered a new peer: {} at {}", peer_id, multiaddr);
+                                self.swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
+                                // Optionally, try to dial the discovered peer if not already connected
+                                // self.swarm.dial(multiaddr).unwrap_or_else(|e| warn!("Failed to dial mDNS peer {}: {:?}", peer_id, e));
+                            }
+                        }
+                        SwarmEvent::Behaviour(RustchainNetworkEvent::Mdns(mdns::Event::Expired { list })) => {
+                            for (peer_id, multiaddr) in list {
+                                debug!("mDNS discover peer has expired: {} at {}", peer_id, multiaddr);
+                                // self.swarm.behaviour_mut().gossipsub.remove_explicit_peer(&peer_id);
+                            }
+                        }
+                        SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {
+                            info!("Connection established with peer: {} at {:?}", peer_id, endpoint.get_remote_address());
+                        }
+                        SwarmEvent::ConnectionClosed { peer_id, cause, .. } => {
+                            info!("Connection closed with peer: {}. Reason: {:?}", peer_id, cause);
+                        }
+                        SwarmEvent::DialFailure { peer_id, error, .. } => {
+                            warn!("Failed to dial peer {:?}: {}", peer_id, error);
+                        }
+                        _ => { 
+                            // debug!("Unhandled Swarm event: {:?}", event);
+                        }
+                    }
+                }
+                // Command from other parts of the application
+                Some(command) = self.command_receiver.recv() => {
+                    match command {
+                        NetworkCommand::ListenOn(addr, responder) => {
+                            match self.swarm.listen_on(addr.clone()) {
+                                Ok(_) => {
+                                    info!("Now also listening on {}", addr);
+                                    let _ = responder.send(Ok(())); // Best effort send
+                                }
+                                Err(e) => {
+                                    error!("Failed to listen on {}: {:?}", addr, e);
+                                    let _ = responder.send(Err(NetworkError::ListenError(e.to_string())));
+                                }
+                            }
+                        }
+                        NetworkCommand::Dial(addr, responder) => {
+                            match self.swarm.dial(addr.clone()) {
+                                Ok(_) => {
+                                    info!("Attempting to dial {}", addr);
+                                    let _ = responder.send(Ok(())); // Dialing is async, result comes as SwarmEvent
+                                }
+                                Err(e) => {
+                                    error!("Failed to dial {}: {:?}", addr, e);
+                                    let _ = responder.send(Err(NetworkError::DialError(e)));
+                                }
+                            }
+                        }
+                        NetworkCommand::BroadcastMessage { topic, message } => {
+                            let bincode_cfg = config::standard();
+                            match bincode::encode_to_vec(&message, bincode_cfg) {
+                                Ok(encoded_message) => {
+                                    if let Err(e) = self.swarm.behaviour_mut().gossipsub.publish(topic.clone(), encoded_message) {
+                                        error!("Failed to publish message to topic {}: {}", topic, e);
+                                    } else {
+                                        debug!("Published message to topic: {}", topic);
+                                    }
+                                }
+                                Err(e) => {
+                                    error!("Failed to serialize message for broadcast: {}", e);
+                                }
+                            }
+                        }
+                    }
+                }
+                // else => { // Both Swarm and command channel are closed.
+                //     info!("NetworkService event loop ended.");
+                //     break;
+                // }
+            }
+        }
+        // Ok(()) // Loop is infinite, so this is not reached unless loop breaks
+    }
 }
 
 // Basic tests (more comprehensive tests will require running multiple instances or mocking)
