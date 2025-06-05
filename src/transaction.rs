@@ -82,10 +82,9 @@ impl Transaction {
             .map_err(|_| TxValidationError::InvalidSignature)
     }
 
-    /// Performs stateless validation checks on the transaction.
-    /// This does NOT verify the signature (use verify_signature for that)
-    /// and does NOT check against world state (use StateMachine for that).
-    pub fn validate_stateless(&self) -> Result<(), TxValidationError> {
+    /// Performs intrinsic property validation checks on the transaction.
+    /// This does NOT verify the signature and does NOT check against world state.
+    pub fn validate_intrinsic_properties(&self) -> Result<(), TxValidationError> {
         if self.amount == 0 {
             return Err(TxValidationError::ZeroAmount);
         }
@@ -95,6 +94,13 @@ impl Transaction {
         // }
         // Add other stateless checks if necessary (e.g., max amount, field formats if not covered by types)
         Ok(())
+    }
+
+    /// Performs comprehensive stateless validation: intrinsic properties and signature verification.
+    /// Does NOT check against world state (use StateMachine for that).
+    pub fn validate(&self, sender_public_key: &PublicKey) -> Result<(), TxValidationError> {
+        self.validate_intrinsic_properties()?;
+        self.verify_signature(sender_public_key)
     }
 
     /// Calculates the unique ID (hash) of the entire transaction, including the signature.
@@ -174,7 +180,7 @@ mod tests {
         // 1. Verify data_to_sign_hash()
         assert_eq!(tx.data_to_sign_hash()?, data_hash, "data_to_sign_hash mismatch");
 
-        // 2. Verify signature
+        // 2. Verify signature (direct call)
         assert!(tx.verify_signature(&sender_wallet.public_key).is_ok(), "Signature verification failed");
 
         // 3. Verify ID hash (should be different from data_to_sign_hash)
@@ -185,8 +191,9 @@ mod tests {
         // Tamper with the transaction and check signature verification fails
         let mut tampered_tx = tx.clone();
         tampered_tx.amount = 200;
-        assert!(tampered_tx.validate_stateless().is_ok(), "Stateless validation should pass for tampered amount if not zero");
+        assert!(tampered_tx.validate_intrinsic_properties().is_ok(), "Intrinsic validation should pass for tampered amount if not zero");
         assert!(tampered_tx.verify_signature(&sender_wallet.public_key).is_err(), "Signature verification should fail for tampered tx");
+        assert_eq!(tampered_tx.validate(&sender_wallet.public_key), Err(TxValidationError::InvalidSignature), "Full validation should fail for tampered tx due to signature");
 
         Ok(())
     }
@@ -198,42 +205,74 @@ mod tests {
         let amount = 50u64;
         let nonce = TypesNonce(2);
         let signature = sender_wallet.sign_data_hash(&TypesHash([0u8; 32])); // Dummy signature for this test
+        
+        let tx1 = Transaction::new(sender_wallet.address, recipient_address, amount, nonce, signature);
+        let tx1_again = Transaction::new(sender_wallet.address, recipient_address, amount, nonce, signature);
 
-        let tx1 = Transaction::new(sender_wallet.address, recipient_address, amount, nonce, signature.clone());
-        let tx2 = Transaction::new(sender_wallet.address, recipient_address, amount, nonce, signature.clone());
+        assert_eq!(tx1.id()?, tx1_again.id()?, "Transaction ID should be consistent for identical transactions");
 
-        assert_eq!(tx1.id()?, tx2.id()?, "Transaction IDs should be consistent for identical transactions");
-
-        let tx3 = Transaction::new(sender_wallet.address, recipient_address, amount + 1, nonce, signature);
-        assert_ne!(tx1.id()?, tx3.id()?, "Transaction IDs should differ for different transactions");
-
+        let mut tx2 = tx1.clone();
+        tx2.amount = 51; // Change amount
+        assert_ne!(tx1.id()?, tx2.id()?, "Transaction ID should change if amount changes");
+        
         Ok(())
     }
 
     #[test]
-    fn stateless_transaction_validation() {
+    fn stateless_transaction_validation() { // Renamed this test to reflect its focus
         let sender_wallet = TestWallet::new();
         let recipient_address = TestWallet::new().address;
-        let valid_amount = 100u64;
-        let valid_nonce = TypesNonce(1);
-        let signature = sender_wallet.sign_data_hash(&TypesHash([0u8; 32])); // Dummy signature for these tests
 
-        // Valid transaction
-        let tx_valid = Transaction::new(sender_wallet.address, recipient_address, valid_amount, valid_nonce, signature.clone());
-        assert!(tx_valid.validate_stateless().is_ok());
+        // Valid transaction (intrinsic properties perspective)
+        let tx_valid_props = Transaction::new(
+            sender_wallet.address,
+            recipient_address,
+            100,
+            TypesNonce(1),
+            sender_wallet.sign_data_hash(&TypesHash([0u8; 32])) // Dummy signature for intrinsic checks
+        );
+        assert!(tx_valid_props.validate_intrinsic_properties().is_ok());
 
-        // Zero amount
-        let tx_zero_amount = Transaction::new(sender_wallet.address, recipient_address, 0, valid_nonce, signature.clone());
-        match tx_zero_amount.validate_stateless() {
-            Err(TxValidationError::ZeroAmount) => (),
-            _ => panic!("Expected ZeroAmount error"),
-        }
+        // Transaction with zero amount
+        let tx_zero_amount = Transaction::new(
+            sender_wallet.address,
+            recipient_address,
+            0, // Zero amount
+            TypesNonce(1),
+            sender_wallet.sign_data_hash(&TypesHash([0u8; 32]))
+        );
+        assert_eq!(tx_zero_amount.validate_intrinsic_properties(), Err(TxValidationError::ZeroAmount));
+        
+        // Test the comprehensive validate method
+        let data_hash_for_valid_sig = tx_valid_props.data_to_sign_hash().unwrap();
+        let valid_signature = sender_wallet.sign_data_hash(&data_hash_for_valid_sig);
 
-        // Optional: Test for sender == recipient if that rule is enabled
-        // let tx_self_send = Transaction::new(sender_wallet.address, sender_wallet.address, valid_amount, valid_nonce, signature);
-        // match tx_self_send.validate_stateless() {
-        //     Err(TxValidationError::SenderIsRecipient) => (),
-        //     _ => panic!("Expected SenderIsRecipient error"),
-        // }
+        let tx_fully_valid = Transaction::new(
+            sender_wallet.address,
+            recipient_address,
+            100,
+            TypesNonce(1),
+            valid_signature
+        );
+        assert!(tx_fully_valid.validate(&sender_wallet.public_key).is_ok(), "Full validation failed for valid tx");
+
+        let tx_bad_sig = Transaction::new(
+            sender_wallet.address,
+            recipient_address,
+            100,
+            TypesNonce(1),
+            sender_wallet.sign_data_hash(&TypesHash([1u8; 32])) // Signature for different data
+        );
+        assert_eq!(tx_bad_sig.validate(&sender_wallet.public_key), Err(TxValidationError::InvalidSignature), "Full validation should fail for bad signature");
+
+        let tx_zero_amount_full_val = Transaction::new(
+            sender_wallet.address,
+            recipient_address,
+            0, 
+            TypesNonce(1),
+            valid_signature // Signature might be valid for zero amount, but intrinsic check should fail first
+        );
+        // The validate() method calls validate_intrinsic_properties() first.
+        assert_eq!(tx_zero_amount_full_val.validate(&sender_wallet.public_key), Err(TxValidationError::ZeroAmount), "Full validation should fail for zero amount before checking signature");
     }
 }
