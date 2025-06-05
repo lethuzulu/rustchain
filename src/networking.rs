@@ -190,6 +190,30 @@ impl NetworkService {
         self.command_sender.clone()
     }
 
+    /// Broadcasts a transaction to the network via gossipsub.
+    pub async fn broadcast_transaction(&self, transaction: Transaction) {
+        let network_message = NetworkMessage::NewTransaction(transaction);
+        let command = NetworkCommand::BroadcastMessage {
+            topic: self.transaction_topic.clone(),
+            message: network_message,
+        };
+        if let Err(e) = self.command_sender.send(command).await {
+            error!("Failed to send broadcast transaction command to network service: {}", e);
+        }
+    }
+
+    /// Broadcasts a block to the network via gossipsub.
+    pub async fn broadcast_block(&self, block: Block) {
+        let network_message = NetworkMessage::NewBlock(block);
+        let command = NetworkCommand::BroadcastMessage {
+            topic: self.block_topic.clone(),
+            message: network_message,
+        };
+        if let Err(e) = self.command_sender.send(command).await {
+            error!("Failed to send broadcast block command to network service: {}", e);
+        }
+    }
+
     /// Runs the NetworkService event loop.
     pub async fn run(mut self) -> Result<(), NetworkError> {
         // Start listening on the configured address.
