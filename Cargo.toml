@@ -8,7 +8,7 @@ edition = "2024"
 # serialization
 serde = "1.0.219"
 serde_derive = "1.0.219"
-bincode = "2.0.1"
+bincode = { version = "2.0.1", features = ["serde"] }
 
 # #crypto
 ed25519-dalek = {version = "2.1.1", features = ["serde"]}
@@ -17,7 +17,15 @@ rand = "0.8.5"
 hex = "0.4.3"
 
 # networking
-libp2p = { version = "0.55", features = ["tcp", "dns", "noise", "gossipsub", "yamux", "mdns"] }
+libp2p = { version = "0.55", features = [
+    "macros",      # For #[derive(NetworkBehaviour)]
+    "gossipsub",
+    "yamux",
+    "noise",
+    "dns",
+    "tcp-tokio",   # Explicitly request Tokio-based TCP transport
+    "mdns-tokio"   # Explicitly request Tokio-based mDNS
+] }
 
 # async runtime
 tokio = { version = "1.45.0", features = ["full"] }
