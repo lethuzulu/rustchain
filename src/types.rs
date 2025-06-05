@@ -7,6 +7,12 @@ use std::fmt;
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Encode)]
 pub struct Hash(pub [u8; 32]);
 
+impl Default for Hash {
+    fn default() -> Self {
+        Hash([0u8; 32])
+    }
+}
+
 impl fmt::Debug for Hash {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_tuple("Hash").field(&hex::encode(self.0)).finish()

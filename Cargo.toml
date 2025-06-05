@@ -18,14 +18,18 @@ hex = "0.4.3"
 
 # networking
 libp2p = { version = "0.55", features = [
+    "tokio",       # Crucial for Tokio integration across libp2p components
     "macros",      # For #[derive(NetworkBehaviour)]
     "gossipsub",
     "yamux",
     "noise",
-    "dns",
-    "tcp-tokio",   # Explicitly request Tokio-based TCP transport
-    "mdns-tokio"   # Explicitly request Tokio-based mDNS
+    # "dns",         # Temporarily disabled due to hickory-resolver feature issues
+    "tcp",         # TCP transport
+    "mdns"         # mDNS for peer discovery
 ] }
+
+
+# hickory-resolver = { version = "0.25.2", features = ["tokio-runtime", "tokio"] }
 
 # async runtime
 tokio = { version = "1.45.0", features = ["full"] }
