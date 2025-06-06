@@ -47,21 +47,51 @@ src/
 
 ```
 
-## 🧪 Local Testnet Instructions
+## 🧪 Running a Local Testnet
 
-### 🔧 Build the node:
+### 1. Build the Node
 
+First, compile the project:
 ```bash
-cargo build --release
+cargo build
 ```
 
-### 🧪 Run a node:
+### 2. Run the First Node (Bootstrap Node)
+
+Open a terminal and start the first node. This node will act as the entry point for other peers.
 
 ```bash
-cargo run -- --node-id 1 --port 3001
+cargo run -- node
 ```
 
-Run multiple instances with different ports and node IDs to simulate a local testnet.
+The node will start and print its Peer ID and listening address. Look for a line like this in the output:
+
+```
+INFO rustchain::networking: Node listening on: /ip4/127.0.0.1/tcp/42257/p2p/12D3KooWLjH8nrFBQdA8YDp9djsNfdmvJhiNvaPi6xxEvvGq8VrY
+```
+
+**Copy the full `/ip4/.../p2p/...` multiaddress**. You will need it for the next step. You can use the `/ip4/127.0.0.1/...` address for local testing.
+
+### 3. Run a Second Node (Peer)
+
+Open a **new, separate terminal window**.
+
+Run the following command, replacing `<BOOTSTRAP_ADDRESS>` with the multiaddress you copied from the first node:
+
+```bash
+cargo run -- node --bootstrap-peer <BOOTSTRAP_ADDRESS>
+```
+
+For example:
+```bash
+cargo run -- node --bootstrap-peer /ip4/127.0.0.1/tcp/42257/p2p/12D3KooWLjH8nrFBQdA8YDp9djsNfdmvJhiNvaPi6xxEvvGq8VrY
+```
+
+### 4. Observe Peer Discovery
+
+You should see log messages in both terminals indicating that the nodes have discovered and connected to each other. The second node will log that it is dialing the bootstrap node, and the first node will log a "Connection established" message.
+
+You have now successfully created a local RustChain testnet with two interconnected nodes!
 
 ### 🔐 Generate wallet keys:
 
