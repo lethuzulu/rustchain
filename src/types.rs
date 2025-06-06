@@ -2,6 +2,9 @@ use serde::{Deserialize, Serialize};
 use bincode::{Encode, config};
 use bincode::enc::Encoder;
 use std::fmt;
+use std::convert::TryFrom;
+use anyhow;
+use sha2::Digest;
 
 /// Represents a 32-byte SHA-256 hash.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Encode)]
@@ -139,6 +142,21 @@ impl AsRef<[u8]> for Address {
 impl From<[u8; 32]> for Address {
     fn from(bytes: [u8; 32]) -> Self {
         Address(bytes)
+    }
+}
+
+/// Derives a blockchain address from a public key by hashing it.
+pub fn address_from_public_key(pk: &PublicKey) -> Address {
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(pk.0.as_bytes());
+    Address(hasher.finalize().into())
+}
+
+impl TryFrom<&PublicKey> for Address {
+    type Error = anyhow::Error;
+
+    fn try_from(pk: &PublicKey) -> Result<Self, Self::Error> {
+        Ok(address_from_public_key(pk))
     }
 }
 
