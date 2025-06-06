@@ -336,6 +336,7 @@ mod tests {
     use super::*;
     use tokio::time::sleep;
     use crate::types::{Address, BlockHeight, Nonce, Signature as TypesSignature, Timestamp};
+    use ed25519_dalek::Signature as Ed25519Signature;
 
     fn generate_keypair() -> identity::Keypair {
         identity::Keypair::generate_ed25519()
@@ -359,64 +360,88 @@ mod tests {
     #[test]
     fn test_network_message_serialization() {
         let keypair = generate_keypair();
-        
+
         let peer_id = keypair.public().to_peer_id();
         let peer_id_bytes = peer_id.to_bytes();
 
         // Explicitly parse the bytes as a Multihash object
-        let multihash_obj = Multihash::from_bytes(&peer_id_bytes)
+        let multihash_obj: Multihash<256> = Multihash::from_bytes(&peer_id_bytes)
             .expect("Failed to parse PeerId bytes as Multihash. PeerId.to_bytes() should yield a valid multihash.");
 
         // Now get the digest from the parsed Multihash
-        let digest_bytes: &[u8] = multihash_obj.digest(); 
-        
+        let digest_bytes: &[u8] = multihash_obj.digest();
+
         // Convert the digest to [u8; 32] for Address
-        let address_bytes: [u8; 32] = digest_bytes.try_into()
+        let address_bytes: [u8; 32] = digest_bytes
+            .try_into()
             .expect("Expected Multihash digest to be 32 bytes for Address conversion");
         let sender_address = Address::from(address_bytes);
 
         let recipient_address = Address([1u8; 32]);
+
+        let signature_bytes = keypair.sign(b"test_tx_data").expect("Signing failed");
+        let dalek_signature = Ed25519Signature::from_bytes(
+            signature_bytes
+                .as_slice()
+                .try_into()
+                .expect("Signature should be 64 bytes"),
+        );
+
 
         let transaction = Transaction {
             sender: sender_address,
             recipient: recipient_address,
             amount: 100,
             nonce: Nonce(1),
-            signature: TypesSignature(keypair.sign(b"test_tx_data").expect("Signing failed")),
+            signature: TypesSignature(dalek_signature),
         };
         let network_msg_tx = NetworkMessage::NewTransaction(transaction.clone());
 
         let bincode_cfg = bincode::config::standard();
-        let serialized_tx = bincode::encode_to_vec(&network_msg_tx, bincode_cfg).expect("Failed to serialize transaction message");
-        let deserialized_tx: NetworkMessage = bincode::decode_from_slice(&serialized_tx, bincode_cfg).expect("Failed to deserialize transaction message");
+        let serialized_tx = bincode::serde::encode_to_vec(&network_msg_tx, bincode_cfg)
+            .expect("Failed to serialize transaction message");
+        let (deserialized_tx, _len): (NetworkMessage, usize) =
+            bincode::serde::decode_from_slice(&serialized_tx, bincode_cfg)
+                .expect("Failed to deserialize transaction message");
 
         match deserialized_tx {
             NetworkMessage::NewTransaction(dtx) => assert_eq!(dtx, transaction),
             _ => panic!("Deserialized to wrong message type"),
         }
-        
+
+        let block_signature_bytes = keypair.sign(b"test_block_data").expect("Signing failed");
+        let block_dalek_signature = Ed25519Signature::from_bytes(
+            block_signature_bytes
+                .as_slice()
+                .try_into()
+                .expect("Signature should be 64 bytes"),
+        );
+
+
         let block_header = crate::block::BlockHeader {
             parent_hash: crate::types::Hash([0u8; 32]),
             block_number: BlockHeight(1),
             timestamp: Timestamp(0),
             tx_root: crate::types::Hash([1u8; 32]),
             validator: sender_address,
-            signature: TypesSignature(keypair.sign(b"test_block_data").expect("Signing failed")),
+            signature: TypesSignature(block_dalek_signature),
         };
         let block = Block {
             header: block_header,
             transactions: vec![transaction.clone()],
         };
         let network_msg_block = NetworkMessage::NewBlock(block.clone());
-        let serialized_block = bincode::encode_to_vec(&network_msg_block, bincode_cfg).expect("Failed to serialize block message");
-        let deserialized_block: NetworkMessage = bincode::decode_from_slice(&serialized_block, bincode_cfg).expect("Failed to deserialize block message");
+        let serialized_block = bincode::serde::encode_to_vec(&network_msg_block, bincode_cfg)
+            .expect("Failed to serialize block message");
+        let (deserialized_block, _len): (NetworkMessage, usize) =
+            bincode::serde::decode_from_slice(&serialized_block, bincode_cfg)
+                .expect("Failed to deserialize block message");
 
         match deserialized_block {
             NetworkMessage::NewBlock(b) => {
-                assert_eq!(b.header.block_number, 1);
+                assert_eq!(b.header.block_number, BlockHeight(1));
             }
             _ => panic!("Deserialized to wrong message type for block"),
         }
     }
-
 }
