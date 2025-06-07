@@ -123,6 +123,20 @@ impl Wallet {
     }
 }
 
+/// Derive address from public key - standalone function for use in other modules
+pub fn address_from_public_key(public_key: &PublicKey) -> Address {
+    Address(*public_key.0.as_bytes())
+}
+
+/// Generate a validator keypair - standalone function for use in other modules  
+pub fn generate_validator_keypair() -> (SigningKey, PublicKey) {
+    let mut csprng = OsRng;
+    let signing_key: SigningKey = SigningKey::generate(&mut csprng);
+    let verifying_key: VerifyingKey = signing_key.verifying_key();
+    let public_key = PublicKey(verifying_key);
+    (signing_key, public_key)
+}
+
 
 #[cfg(test)]
 mod tests {

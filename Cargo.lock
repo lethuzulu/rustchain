@@ -3074,6 +3074,7 @@ dependencies = [
  "rocksdb",
  "serde",
  "serde_derive",
+ "serde_json",
  "sha2",
  "tempfile",
  "thiserror 1.0.69",

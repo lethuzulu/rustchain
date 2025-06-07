@@ -18,11 +18,45 @@ use rustchain::state_machine::StateMachine;
 use rustchain::storage::Storage;
 use rustchain::mempool::{Mempool, MempoolConfig};
 use rustchain::block::{Block, BlockHeader, calculate_merkle_root};
-use rustchain::types::{BlockHeight, Hash, Signature, Timestamp, address_from_public_key};
+use rustchain::types::{BlockHeight, Hash, Signature, Timestamp, PublicKey};
+use rustchain::wallet::{address_from_public_key, generate_validator_keypair};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
-use ed25519_dalek::Signer;
+use ed25519_dalek::{Signer, VerifyingKey};
+use serde::{Deserialize, Serialize};
+use std::fs;
+
+/// Genesis configuration data loaded from JSON file
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GenesisData {
+    /// List of initial validator public keys
+    pub validators: Vec<String>, // Hex-encoded public keys
+    /// Initial account balances 
+    pub initial_balances: std::collections::HashMap<String, u64>, // Address -> Balance
+    /// Genesis timestamp (Unix timestamp)
+    pub timestamp: u64,
+    /// Genesis block message
+    pub message: String,
+}
+
+impl Default for GenesisData {
+    fn default() -> Self {
+        // Generate a default validator for development
+        let (_, validator_public_key) = generate_validator_keypair();
+        let validator_address = address_from_public_key(&validator_public_key);
+        
+        let mut initial_balances = std::collections::HashMap::new();
+        initial_balances.insert(hex::encode(validator_address.0), 1000000); // 1M tokens for validator
+        
+        Self {
+            validators: vec![hex::encode(validator_public_key.0.to_bytes())],
+            initial_balances,
+            timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
+            message: "RustChain Genesis Block".to_string(),
+        }
+    }
+}
 
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
@@ -50,6 +84,10 @@ struct NodeArgs {
     /// Maximum transactions per block (default: 10)
     #[clap(long, default_value = "10")]
     pub max_txs_per_block: usize,
+
+    /// Path to genesis configuration file
+    #[clap(long)]
+    pub genesis_file: Option<PathBuf>,
 }
 
 // Helper function to parse Address from hex string
@@ -62,6 +100,95 @@ fn parse_address(s: &str) -> Result<Address, String> {
     hex::decode_to_slice(s, &mut bytes)
         .map_err(|e| format!("Invalid hex string for address: {}", e))?;
     Ok(Address(bytes))
+}
+
+/// Initialize genesis state from genesis data
+async fn initialize_genesis_state(
+    genesis_data: &GenesisData,
+    storage: &Arc<Mutex<Storage>>,
+    state_machine: &Arc<Mutex<StateMachine>>,
+) -> anyhow::Result<()> {
+    tracing::info!("Initializing genesis state...");
+
+    // Parse and set initial account balances
+    let mut state_machine_lock = state_machine.lock().await;
+    for (address_hex, balance) in &genesis_data.initial_balances {
+        let address = parse_address(address_hex)
+            .map_err(|e| anyhow::anyhow!("Invalid address in genesis: {}", e))?;
+        
+        let account = rustchain::state_machine::Account {
+            balance: *balance,
+            nonce: Nonce(0),
+        };
+        
+        state_machine_lock.set_account(address, account);
+        tracing::info!("Genesis account: {} -> balance: {}", address_hex, balance);
+    }
+    drop(state_machine_lock);
+
+    // Create genesis block
+    let genesis_block = create_genesis_block(genesis_data)?;
+    tracing::info!("Created genesis block with hash: {}", genesis_block.header.calculate_hash()?);
+
+    // Store genesis block and state
+    let storage_lock = storage.lock().await;
+    storage_lock.put_block(&genesis_block)
+        .map_err(|e| anyhow::anyhow!("Failed to store genesis block: {}", e))?;
+    
+    storage_lock.put_header_by_height(genesis_block.header.block_number.0, &genesis_block.header)
+        .map_err(|e| anyhow::anyhow!("Failed to store genesis header: {}", e))?;
+    
+    storage_lock.set_chain_tip(&genesis_block.header.calculate_hash()?, genesis_block.header.block_number.0)
+        .map_err(|e| anyhow::anyhow!("Failed to set genesis chain tip: {}", e))?;
+
+    // Store initial account states
+    let state_machine_lock = state_machine.lock().await;
+    for (address_hex, balance) in &genesis_data.initial_balances {
+        let address = parse_address(address_hex)
+            .map_err(|e| anyhow::anyhow!("Invalid address in genesis initial balances: {}", e))?;
+        let account = rustchain::state_machine::Account {
+            balance: *balance,
+            nonce: Nonce(0),
+        };
+        storage_lock.put_account(&address, &account)
+            .map_err(|e| anyhow::anyhow!("Failed to store genesis account: {}", e))?;
+    }
+    drop(state_machine_lock);
+    drop(storage_lock);
+
+    tracing::info!("Genesis state initialized successfully!");
+    Ok(())
+}
+
+/// Create the genesis block from genesis data
+fn create_genesis_block(genesis_data: &GenesisData) -> anyhow::Result<Block> {
+    // Genesis block has no transactions and no parent
+    let transactions = Vec::new();
+    let merkle_root = calculate_merkle_root(&transactions);
+    
+    // Parse the first validator as the genesis proposer
+    let proposer_bytes = hex::decode(&genesis_data.validators[0])
+        .map_err(|e| anyhow::anyhow!("Invalid proposer key in genesis: {}", e))?;
+    if proposer_bytes.len() != 32 {
+        return Err(anyhow::anyhow!("Genesis proposer key must be 32 bytes"));
+    }
+    let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&proposer_bytes.try_into().unwrap())
+        .map_err(|e| anyhow::anyhow!("Invalid Ed25519 proposer key: {}", e))?;
+    let proposer = PublicKey(verifying_key);
+    
+    let header = BlockHeader {
+        parent_hash: Hash([0u8; 32]), // Genesis has no parent
+        block_number: BlockHeight(0),
+        timestamp: Timestamp(genesis_data.timestamp),
+        tx_root: merkle_root?,
+        validator: address_from_public_key(&proposer),
+        signature: Signature(vec![0u8; 64]), // Genesis block can have empty signature
+    };
+
+    Ok(Block {
+        header,
+        transactions,
+    })
 }
 
 // Main entry point needs to be async if we call async functions directly within it.
@@ -94,29 +221,79 @@ async fn main() -> anyhow::Result<()> {
 async fn run_node(node_args: NodeArgs) -> anyhow::Result<()> {
     tracing::info!("Starting RustChain node...");
 
-    // 1. Initialize Storage
+    // 1. Load Genesis Configuration
+    let genesis_data = if let Some(genesis_path) = &node_args.genesis_file {
+        tracing::info!("Loading genesis from file: {:?}", genesis_path);
+        let genesis_json = fs::read_to_string(genesis_path)
+            .map_err(|e| anyhow::anyhow!("Failed to read genesis file: {}", e))?;
+        serde_json::from_str::<GenesisData>(&genesis_json)
+            .map_err(|e| anyhow::anyhow!("Failed to parse genesis JSON: {}", e))?
+    } else {
+        tracing::info!("No genesis file specified, using default genesis configuration");
+        GenesisData::default()
+    };
+    tracing::info!("Genesis loaded with {} validators and {} initial accounts", 
+        genesis_data.validators.len(), 
+        genesis_data.initial_balances.len()
+    );
+
+    // 2. Initialize Storage
     let db_path = "rustchain_db";
     let storage = Arc::new(Mutex::new(
         Storage::new(db_path).map_err(|e| anyhow::anyhow!("Failed to initialize storage: {}", e))?,
     ));
     tracing::info!("Storage initialized at: {}", db_path);
 
-    // 2. Initialize StateMachine
+    // 3. Check if genesis needs to be initialized
+    let needs_genesis = {
+        let storage_lock = storage.lock().await;
+        match storage_lock.get_chain_tip() {
+            Ok(None) => {
+                tracing::info!("No chain tip found, initializing genesis block");
+                true
+            }
+            Ok(Some((_, height))) => {
+                tracing::info!("Existing chain found with height: {}", height);
+                false
+            }
+            Err(e) => {
+                tracing::warn!("Error checking chain tip: {}. Assuming fresh database.", e);
+                true
+            }
+        }
+    };
+
+    // 4. Initialize StateMachine with genesis state
     let state_machine = Arc::new(Mutex::new(StateMachine::new()));
+    if needs_genesis {
+        initialize_genesis_state(&genesis_data, &storage, &state_machine).await?;
+    }
     tracing::info!("StateMachine initialized.");
 
-    // 3. Initialize Mempool
+    // 5. Initialize Mempool
     let mempool_config = MempoolConfig::default();
     let mempool = Arc::new(Mutex::new(Mempool::new(mempool_config)));
     tracing::info!("Mempool initialized with capacity: {}", mempool_config.max_transactions);
 
-    // 4. Initialize ConsensusEngine and Validator Wallet
+    // 6. Parse validator public keys from genesis and initialize ConsensusEngine
+    let mut validator_public_keys = Vec::new();
+    for validator_hex in &genesis_data.validators {
+        let public_key_bytes = hex::decode(validator_hex)
+            .map_err(|e| anyhow::anyhow!("Invalid validator public key hex: {}", e))?;
+        if public_key_bytes.len() != 32 {
+            return Err(anyhow::anyhow!("Validator public key must be 32 bytes"));
+        }
+        let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&public_key_bytes.try_into().unwrap())
+            .map_err(|e| anyhow::anyhow!("Invalid Ed25519 public key: {}", e))?;
+        validator_public_keys.push(PublicKey(verifying_key));
+    }
+
+    // Create our validator wallet (for now, use the first validator from genesis)
     let validator_wallet = rustchain::wallet::Wallet::new();
-    let validators = vec![*validator_wallet.public_key()];
-    let consensus_engine = Arc::new(Mutex::new(ConsensusEngine::new(validators.clone())));
+    let consensus_engine = Arc::new(Mutex::new(ConsensusEngine::new(validator_public_keys.clone())));
     tracing::info!(
         "ConsensusEngine initialized with {} validator(s). Our validator address: {}", 
-        validators.len(),
+        validator_public_keys.len(),
         address_from_public_key(validator_wallet.public_key())
     );
 

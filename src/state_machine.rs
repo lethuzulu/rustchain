@@ -117,6 +117,16 @@ impl StateMachine {
         }
         Ok(())
     }
+
+    /// Set an account in the world state (for genesis initialization)
+    pub fn set_account(&mut self, address: Address, account: Account) {
+        self.world_state.insert(address, account);
+    }
+
+    /// Get an account from the world state
+    pub fn get_account(&self, address: &Address) -> Option<&Account> {
+        self.world_state.get(address)
+    }
 }
 
 #[cfg(test)]

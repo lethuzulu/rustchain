@@ -1,4 +1,4 @@
-use crate::block::Block;
+use crate::block::{Block, BlockHeader};
 use crate::state_machine::{Account, WorldState};
 use crate::types::{Address, Hash, BlockHeight};
 use rocksdb::{DB, Options, WriteBatch};
@@ -109,7 +109,7 @@ impl Storage {
         Ok(Some((tip_hash, height)))
     }
 
-    fn put_chain_tip(&self, hash: &Hash, height: u64) -> Result<(), StorageError> {
+    pub fn set_chain_tip(&self, hash: &Hash, height: u64) -> Result<(), StorageError> {
         let cf = self.get_cf(META_CF)?;
         
         let hash_bytes = bincode::encode_to_vec(hash, bincode::config::standard())
@@ -120,6 +120,15 @@ impl Storage {
             .map_err(|e| StorageError::SerializationError(e.to_string()))?;
         self.db.put_cf(cf, HEIGHT_KEY, height_bytes)?;
         
+        Ok(())
+    }
+
+    pub fn put_header_by_height(&self, height: u64, header: &BlockHeader) -> Result<(), StorageError> {
+        let cf = self.get_cf(HEADERS_CF)?;
+        let key = height.to_be_bytes(); // Use big-endian encoding for consistent sorting
+        let bytes = bincode::encode_to_vec(header, bincode::config::standard())
+            .map_err(|e| StorageError::SerializationError(e.to_string()))?;
+        self.db.put_cf(cf, key, bytes)?;
         Ok(())
     }
     
