@@ -1,0 +1,26 @@
+# RustChain Development Configuration
+
+# Network configuration for development
+[network]
+listen_port = 9001
+listen_addr = "0.0.0.0"
+bootstrap_peers = []
+max_peers = 25
+
+# Storage configuration for development
+[storage]
+db_path = "dev_rustchain_db"
+create_if_missing = true
+
+# Consensus configuration for faster development
+[consensus]
+block_interval = 3
+max_txs_per_block = 5
+
+# Validator configuration enabled for development
+[validator]
+enabled = true
+private_key_path = "dev/dev-validator.key"
+
+# Use the test genesis file
+genesis_file = "dev/test_genesis.json" 

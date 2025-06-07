@@ -26,6 +26,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use ed25519_dalek::{Signer, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::net::SocketAddr;
 
 /// Genesis configuration data loaded from JSON file
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,6 +59,144 @@ impl Default for GenesisData {
     }
 }
 
+/// Node configuration structure
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeConfiguration {
+    /// Network configuration
+    pub network: NodeNetworkConfig,
+    /// Storage configuration
+    pub storage: NodeStorageConfig,
+    /// Consensus configuration
+    pub consensus: NodeConsensusConfig,
+    /// Validator configuration (optional)
+    pub validator: Option<NodeValidatorConfig>,
+    /// Genesis file path
+    pub genesis_file: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeNetworkConfig {
+    /// Port to listen on for P2P connections
+    pub listen_port: u16,
+    /// Listen address for P2P connections
+    pub listen_addr: String,
+    /// List of bootstrap peer addresses
+    pub bootstrap_peers: Vec<String>,
+    /// Maximum number of peers
+    pub max_peers: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeStorageConfig {
+    /// Database directory path
+    pub db_path: String,
+    /// Whether to create database if it doesn't exist
+    pub create_if_missing: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeConsensusConfig {
+    /// Block production interval in seconds
+    pub block_interval: u64,
+    /// Maximum transactions per block
+    pub max_txs_per_block: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeValidatorConfig {
+    /// Path to validator private key file
+    pub private_key_path: String,
+    /// Whether this node should act as a validator
+    pub enabled: bool,
+}
+
+impl Default for NodeConfiguration {
+    fn default() -> Self {
+        Self {
+            network: NodeNetworkConfig {
+                listen_port: 9000,
+                listen_addr: "127.0.0.1".to_string(),
+                bootstrap_peers: Vec::new(),
+                max_peers: 50,
+            },
+            storage: NodeStorageConfig {
+                db_path: "rustchain_db".to_string(),
+                create_if_missing: true,
+            },
+            consensus: NodeConsensusConfig {
+                block_interval: 5,
+                max_txs_per_block: 10,
+            },
+            validator: None,
+            genesis_file: None,
+        }
+    }
+}
+
+impl NodeConfiguration {
+    /// Load configuration from TOML file, with CLI args taking precedence
+    pub fn load_from_file_and_args(
+        config_path: Option<&str>,
+        node_args: &NodeArgs,
+    ) -> anyhow::Result<Self> {
+        // Start with defaults
+        let mut config = if let Some(path) = config_path {
+            tracing::info!("Loading configuration from: {}", path);
+            let config_content = fs::read_to_string(path)
+                .map_err(|e| anyhow::anyhow!("Failed to read config file: {}", e))?;
+            let parsed_config = toml::from_str::<NodeConfiguration>(&config_content)
+                .map_err(|e| anyhow::anyhow!("Failed to parse config TOML: {}", e))?;
+            tracing::info!("Loaded config genesis_file: {:?}", parsed_config.genesis_file);
+            parsed_config
+        } else {
+            NodeConfiguration::default()
+        };
+
+        // Override with CLI arguments
+        if let Some(ref genesis_file) = node_args.genesis_file {
+            config.genesis_file = Some(genesis_file.to_string_lossy().to_string());
+        }
+        
+        if node_args.block_interval != 5 { // 5 is our default
+            config.consensus.block_interval = node_args.block_interval;
+        }
+        
+        if node_args.max_txs_per_block != 10 { // 10 is our default
+            config.consensus.max_txs_per_block = node_args.max_txs_per_block;
+        }
+
+        if let Some(ref db_path) = node_args.db_path {
+            config.storage.db_path = db_path.to_string_lossy().to_string();
+        }
+
+        if let Some(port) = node_args.port {
+            config.network.listen_port = port;
+        }
+
+        if let Some(ref addr) = node_args.listen_addr {
+            config.network.listen_addr = addr.clone();
+        }
+
+        if !node_args.bootstrap_peers.is_empty() {
+            config.network.bootstrap_peers = node_args.bootstrap_peers.clone();
+        }
+
+        // Set up validator configuration
+        if node_args.validator || node_args.validator_key.is_some() {
+            let validator_config = NodeValidatorConfig {
+                enabled: node_args.validator,
+                private_key_path: node_args.validator_key
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "validator.key".to_string()),
+            };
+            config.validator = Some(validator_config);
+        }
+
+        Ok(config)
+    }
+}
+
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
 #[clap(propagate_version = true)]
@@ -77,6 +216,10 @@ enum Commands {
 
 #[derive(Parser, Debug)]
 struct NodeArgs {
+    /// Path to configuration file (TOML format)
+    #[clap(long, short = 'c')]
+    pub config: Option<PathBuf>,
+
     /// Block production interval in seconds (default: 5)
     #[clap(long, default_value = "5")]
     pub block_interval: u64,
@@ -88,6 +231,30 @@ struct NodeArgs {
     /// Path to genesis configuration file
     #[clap(long)]
     pub genesis_file: Option<PathBuf>,
+
+    /// Database directory path
+    #[clap(long)]
+    pub db_path: Option<PathBuf>,
+
+    /// Network listen port
+    #[clap(long)]
+    pub port: Option<u16>,
+
+    /// Network listen address
+    #[clap(long)]
+    pub listen_addr: Option<String>,
+
+    /// Bootstrap peer addresses (can be specified multiple times)
+    #[clap(long)]
+    pub bootstrap_peers: Vec<String>,
+
+    /// Validator private key file path
+    #[clap(long)]
+    pub validator_key: Option<PathBuf>,
+
+    /// Enable validator mode
+    #[clap(long)]
+    pub validator: bool,
 }
 
 // Helper function to parse Address from hex string
@@ -211,19 +378,24 @@ async fn main() -> anyhow::Result<()> {
             cli::wallet_cli::run_wallet_cli(wallet_cli_args)?;
         }
         Commands::Node(node_args) => {
-            run_node(node_args).await?;
+            // Load configuration from file and CLI args
+            let config_path = node_args.config.as_ref().map(|p| p.to_string_lossy());
+            let config_path_str = config_path.as_ref().map(|s| s.as_ref());
+            let config = NodeConfiguration::load_from_file_and_args(config_path_str, &node_args)?;
+            
+            run_node(config).await?;
         }
     }
 
     Ok(())
 }
 
-async fn run_node(node_args: NodeArgs) -> anyhow::Result<()> {
-    tracing::info!("Starting RustChain node...");
+async fn run_node(config: NodeConfiguration) -> anyhow::Result<()> {
+    tracing::info!("Starting RustChain node with configuration: {:?}", config);
 
     // 1. Load Genesis Configuration
-    let genesis_data = if let Some(genesis_path) = &node_args.genesis_file {
-        tracing::info!("Loading genesis from file: {:?}", genesis_path);
+    let genesis_data = if let Some(ref genesis_path) = config.genesis_file {
+        tracing::info!("Loading genesis from file: {}", genesis_path);
         let genesis_json = fs::read_to_string(genesis_path)
             .map_err(|e| anyhow::anyhow!("Failed to read genesis file: {}", e))?;
         serde_json::from_str::<GenesisData>(&genesis_json)
@@ -238,11 +410,10 @@ async fn run_node(node_args: NodeArgs) -> anyhow::Result<()> {
     );
 
     // 2. Initialize Storage
-    let db_path = "rustchain_db";
     let storage = Arc::new(Mutex::new(
-        Storage::new(db_path).map_err(|e| anyhow::anyhow!("Failed to initialize storage: {}", e))?,
+        Storage::new(&config.storage.db_path).map_err(|e| anyhow::anyhow!("Failed to initialize storage: {}", e))?,
     ));
-    tracing::info!("Storage initialized at: {}", db_path);
+    tracing::info!("Storage initialized at: {}", config.storage.db_path);
 
     // 3. Check if genesis needs to be initialized
     let needs_genesis = {
@@ -277,7 +448,8 @@ async fn run_node(node_args: NodeArgs) -> anyhow::Result<()> {
 
     // 6. Parse validator public keys from genesis and initialize ConsensusEngine
     let mut validator_public_keys = Vec::new();
-    for validator_hex in &genesis_data.validators {
+    for (i, validator_hex) in genesis_data.validators.iter().enumerate() {
+        tracing::info!("Parsing genesis validator {}: {}", i, validator_hex);
         let public_key_bytes = hex::decode(validator_hex)
             .map_err(|e| anyhow::anyhow!("Invalid validator public key hex: {}", e))?;
         if public_key_bytes.len() != 32 {
@@ -285,11 +457,26 @@ async fn run_node(node_args: NodeArgs) -> anyhow::Result<()> {
         }
         let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&public_key_bytes.try_into().unwrap())
             .map_err(|e| anyhow::anyhow!("Invalid Ed25519 public key: {}", e))?;
-        validator_public_keys.push(PublicKey(verifying_key));
+        let public_key = PublicKey(verifying_key);
+        let derived_address = address_from_public_key(&public_key);
+        tracing::info!("Genesis validator {} -> derived address: {}", i, hex::encode(derived_address.0));
+        validator_public_keys.push(public_key);
     }
 
-    // Create our validator wallet (for now, use the first validator from genesis)
-    let validator_wallet = rustchain::wallet::Wallet::new();
+    // Load validator wallet from configured key file
+    let validator_wallet = if let Some(validator_config) = &config.validator {
+        if validator_config.enabled {
+            tracing::info!("Loading validator key from: {}", validator_config.private_key_path);
+            rustchain::wallet::Wallet::load_from_file(&validator_config.private_key_path)
+                .map_err(|e| anyhow::anyhow!("Failed to load validator key: {}", e))?
+        } else {
+            tracing::info!("Validator mode disabled, creating dummy wallet");
+            rustchain::wallet::Wallet::new()
+        }
+    } else {
+        tracing::info!("No validator configuration, creating dummy wallet");
+        rustchain::wallet::Wallet::new()
+    };
     let consensus_engine = Arc::new(Mutex::new(ConsensusEngine::new(validator_public_keys.clone())));
     tracing::info!(
         "ConsensusEngine initialized with {} validator(s). Our validator address: {}", 
@@ -529,12 +716,17 @@ async fn run_node(node_args: NodeArgs) -> anyhow::Result<()> {
     let storage_producer = storage.clone();
     let network_sender = network_command_sender.clone();
     let validator_wallet_clone = validator_wallet;
+    
+    // Extract config values before moving into async task
+    let block_interval = config.consensus.block_interval;
+    let max_txs_per_block = config.consensus.max_txs_per_block;
 
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(node_args.block_interval));
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(block_interval));
         
         loop {
             interval.tick().await;
+            tracing::info!("Block production timer tick");
             
             // Check if it's our turn to propose
             let current_time = SystemTime::now()
@@ -574,7 +766,7 @@ async fn run_node(node_args: NodeArgs) -> anyhow::Result<()> {
             let expected_address = address_from_public_key(expected_proposer);
             
             if our_address != expected_address {
-                tracing::debug!("Not our turn to propose. Expected: {}, We are: {}", expected_address, our_address);
+                tracing::info!("Not our turn to propose. Expected: {}, We are: {}", hex::encode(expected_address.0), hex::encode(our_address.0));
                 drop(consensus_lock);
                 continue;
             }
@@ -584,7 +776,7 @@ async fn run_node(node_args: NodeArgs) -> anyhow::Result<()> {
             
             // Collect transactions from mempool
             let mempool_lock = mempool_producer.lock().await;
-            let transactions = mempool_lock.get_pending_transactions(node_args.max_txs_per_block);
+            let transactions = mempool_lock.get_pending_transactions(max_txs_per_block);
             let num_txs = transactions.len();
             drop(mempool_lock);
             

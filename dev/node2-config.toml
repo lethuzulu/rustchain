@@ -1,0 +1,15 @@
+genesis_file = "dev/test_genesis.json"
+
+[network]
+listen_port = 9002
+listen_addr = "127.0.0.1"
+bootstrap_peers = ["/ip4/127.0.0.1/tcp/9001"]
+max_peers = 50
+
+[storage]
+db_path = "test_node_2_db"
+create_if_missing = true
+
+[consensus]
+block_interval = 3
+max_txs_per_block = 5

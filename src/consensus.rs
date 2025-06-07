@@ -1,5 +1,6 @@
 use crate::block::{Block, BlockHeader};
-use crate::types::{address_from_public_key, Address, BlockHeight, PublicKey};
+use crate::types::{Address, BlockHeight, PublicKey};
+use crate::wallet::address_from_public_key;
 use ed25519_dalek::Verifier;
 use thiserror::Error;
 use bincode::error::EncodeError;
@@ -37,6 +38,12 @@ pub struct ConsensusEngine {
 impl ConsensusEngine {
     /// Creates a new consensus engine with a given set of static validators.
     pub fn new(validators: Vec<PublicKey>) -> Self {
+        tracing::info!("ConsensusEngine::new with {} validators:", validators.len());
+        for (i, pk) in validators.iter().enumerate() {
+            tracing::info!("  Validator {} public key bytes: {}", i, hex::encode(pk.0.to_bytes()));
+            let address = address_from_public_key(pk);
+            tracing::info!("  Validator {}: address {}", i, hex::encode(address.0));
+        }
         Self { validators }
     }
 
@@ -46,7 +53,10 @@ impl ConsensusEngine {
             return Err(ConsensusError::ProposerNotInValidatorSet);
         }
         let proposer_index = (height.0 as usize) % self.validators.len();
-        Ok(&self.validators[proposer_index])
+        let proposer_pk = &self.validators[proposer_index];
+        let proposer_address = address_from_public_key(proposer_pk);
+        tracing::info!("get_proposer for height {}: index {}, address {}", height.0, proposer_index, hex::encode(proposer_address.0));
+        Ok(proposer_pk)
     }
 
     /// Validates a block's proposer against the round-robin schedule.
