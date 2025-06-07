@@ -1,10 +1,11 @@
 use crate::block::Block;
 use crate::transaction::Transaction;
+use crate::types::Hash;
 
 use libp2p::core::{Transport, multiaddr::Protocol}; // Corrected import for libp2p_core types
 use libp2p::{
     futures::StreamExt, 
-    gossipsub::{self, IdentTopic as Topic, MessageAuthenticity, ValidationMode},
+    gossipsub::{self, IdentTopic, MessageAuthenticity, ValidationMode},
     identity,
     mdns, // For mdns::tokio::Behaviour
     swarm::{NetworkBehaviour, SwarmEvent, Config as SwarmNetworkConfig}, // Added Config as SwarmNetworkConfig
@@ -15,16 +16,18 @@ use libp2p::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
+use std::hash::{Hash as StdHash, Hasher};
 use std::time::Duration;
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
 use bincode::{Encode, Decode};
 
 pub use libp2p::PeerId as Libp2pPeerId;
+pub use libp2p::gossipsub::IdentTopic as Topic;
 
 const TRANSACTION_TOPIC: &str = "transactions";
 const BLOCK_TOPIC: &str = "blocks";
+const SYNC_PROTOCOL: &str = "/rustchain/sync/1.0.0";
 
 /// Configuration for the NetworkService.
 #[derive(Debug, Clone)]
@@ -48,6 +51,27 @@ impl Default for NetworkConfig {
 pub enum NetworkMessage {
     NewTransaction(Transaction),
     NewBlock(Block),
+    SyncRequest { 
+        from_height: u64, 
+        to_hash: Option<Hash> 
+    },
+    SyncResponseBlocks { 
+        blocks: Vec<Block> 
+    },
+    SyncResponseNoBlocks,
+}
+
+/// Sync request/response types for libp2p request-response protocol
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+pub struct SyncRequest {
+    pub from_height: u64,
+    pub to_hash: Option<Hash>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+pub enum SyncResponse {
+    Blocks(Vec<Block>),
+    NoBlocks,
 }
 
 /// Custom NetworkBehaviour that combines Gossipsub and Mdns.
@@ -107,8 +131,8 @@ pub struct NetworkService {
     command_receiver: mpsc::Receiver<NetworkCommand>,
     command_sender: mpsc::Sender<NetworkCommand>,
     incoming_message_sender: mpsc::Sender<NetworkMessage>,
-    transaction_topic: Topic,
-    block_topic: Topic,
+    transaction_topic: IdentTopic,
+    block_topic: IdentTopic,
     config: NetworkConfig,
 }
 
@@ -117,7 +141,7 @@ pub enum NetworkCommand {
     ListenOn(Multiaddr, oneshot::Sender<Result<(), NetworkError>>),
     Dial(Multiaddr, oneshot::Sender<Result<(), NetworkError>>),
     BroadcastMessage { 
-        topic: Topic, 
+        topic: IdentTopic, 
         message: NetworkMessage 
     },
     BroadcastBlock(Block),
@@ -134,8 +158,8 @@ impl NetworkService {
         let local_peer_id = Libp2pPeerId::from(local_keypair.public());
         info!("Local Peer ID: {}", local_peer_id);
 
-        let transaction_topic = Topic::new(TRANSACTION_TOPIC);
-        let block_topic = Topic::new(BLOCK_TOPIC);
+        let transaction_topic = IdentTopic::new(TRANSACTION_TOPIC);
+        let block_topic = IdentTopic::new(BLOCK_TOPIC);
 
         let transport = TokioTcpTransport::new(libp2p::tcp::Config::default().nodelay(true))
             .upgrade(libp2p::core::upgrade::Version::V1Lazy)
@@ -167,7 +191,11 @@ impl NetworkService {
 
         let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id)
             .map_err(|e| NetworkError::SwarmBuildError(format!("Failed to create mDNS: {}",e)))?;
-        let behaviour = RustchainNetworkBehaviour { gossipsub, mdns };
+        
+        let behaviour = RustchainNetworkBehaviour { 
+            gossipsub, 
+            mdns,
+        };
 
         // Using direct Swarm::new with swarm::Config
         let swarm_network_config = SwarmNetworkConfig::with_tokio_executor();

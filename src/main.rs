@@ -145,13 +145,61 @@ async fn run_node(node_args: NodeArgs) -> anyhow::Result<()> {
     // 9. Spawn NetworkService::run() as a Tokio task
     tokio::spawn(network_service.run());
 
+    // 10. Initial chain synchronization - request missing blocks from peers
+    let sync_storage = storage.clone();
+    let sync_network_sender = network_command_sender.clone();
+    
+    tokio::spawn(async move {
+        // Wait a bit for network to connect to peers
+        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+        
+        tracing::info!("Starting initial chain synchronization...");
+        
+        // Get our current chain tip
+        let storage_lock = sync_storage.lock().await;
+        let (current_tip_hash, current_height) = match storage_lock.get_chain_tip() {
+            Ok(Some((hash, height))) => {
+                tracing::info!("Current chain height: {}", height);
+                (hash, height)
+            }
+            Ok(None) => {
+                tracing::info!("Empty chain, requesting blocks from height 1");
+                (Hash([0u8; 32]), 0)
+            }
+            Err(e) => {
+                tracing::error!("Failed to get chain tip for sync: {}", e);
+                return;
+            }
+        };
+        drop(storage_lock);
+        
+        // Request blocks starting from our next block
+        let sync_request = NetworkMessage::SyncRequest {
+            from_height: current_height + 1,
+            to_hash: None, // Request all available blocks
+        };
+        
+        // Broadcast sync request to peers
+        if let Err(e) = sync_network_sender.send(rustchain::networking::NetworkCommand::BroadcastMessage {
+            topic: rustchain::networking::Topic::new("sync"),
+            message: sync_request,
+        }).await {
+            tracing::error!("Failed to send initial sync request: {}", e);
+        } else {
+            tracing::info!("Sent initial sync request for blocks starting from height {}", current_height + 1);
+        }
+        
+        // Note: Responses will be handled by the message handler above
+    });
+
     // Clone Arcs for the message handling task
     let consensus_engine_clone = consensus_engine.clone();
     let state_machine_clone = state_machine.clone();
     let storage_clone = storage.clone();
     let mempool_clone = mempool.clone();
+    let network_command_sender_clone = network_command_sender.clone();
 
-    // 10. Task to handle incoming messages from the NetworkService
+    // 11. Task to handle incoming messages from the NetworkService
     tokio::spawn(async move {
         tracing::info!("Incoming message handler task started.");
         while let Some(message) = incoming_message_receiver.recv().await {
@@ -208,11 +256,96 @@ async fn run_node(node_args: NodeArgs) -> anyhow::Result<()> {
 
                     tracing::info!("Successfully processed and committed new block: height {}", block.header.block_number.0);
                 }
+                NetworkMessage::SyncRequest { from_height, to_hash } => {
+                    tracing::info!("Received SyncRequest: from_height {}, to_hash {:?}", from_height, to_hash);
+                    
+                    // Respond with blocks from our storage
+                    let storage_lock = storage_clone.lock().await;
+                    let (current_tip_hash, current_height) = match storage_lock.get_chain_tip() {
+                        Ok(Some((hash, height))) => (hash, height),
+                        Ok(None) => {
+                            tracing::warn!("Cannot respond to sync request: no chain tip");
+                            continue;
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to get chain tip for sync response: {}", e);
+                            continue;
+                        }
+                    };
+                    
+                    let mut blocks_to_send = Vec::new();
+                    let max_blocks = 50; // Limit blocks per response
+                    let end_height = std::cmp::min(current_height, from_height + max_blocks - 1);
+                    
+                    // For now, we'll implement a simple approach - just send current tip if requested
+                    // TODO: Implement proper height-based block retrieval
+                    if from_height <= current_height {
+                        if let Ok(Some(block)) = storage_lock.get_block(&current_tip_hash) {
+                            blocks_to_send.push(block);
+                        }
+                    }
+                    drop(storage_lock);
+                    
+                    // Send response
+                    let response_message = if blocks_to_send.is_empty() {
+                        NetworkMessage::SyncResponseNoBlocks
+                    } else {
+                        NetworkMessage::SyncResponseBlocks { blocks: blocks_to_send }
+                    };
+                    
+                    // Broadcast the response (in a real implementation, this would be sent to specific peer)
+                    if let Err(e) = network_command_sender_clone.send(rustchain::networking::NetworkCommand::BroadcastMessage {
+                        topic: rustchain::networking::Topic::new("sync"),
+                        message: response_message,
+                    }).await {
+                        tracing::error!("Failed to send sync response: {}", e);
+                    }
+                }
+                NetworkMessage::SyncResponseBlocks { blocks } => {
+                    tracing::info!("Received SyncResponseBlocks with {} blocks", blocks.len());
+                    
+                    // Process each block in order
+                    for block in blocks {
+                        // Validate block through consensus
+                        let consensus_engine = consensus_engine_clone.lock().await;
+                        if let Err(e) = consensus_engine.validate_block(&block) {
+                            tracing::warn!("Invalid block in sync response: {}", e);
+                            drop(consensus_engine);
+                            continue;
+                        }
+                        drop(consensus_engine);
+
+                        // Apply block to state machine
+                        let mut state_machine = state_machine_clone.lock().await;
+                        if let Err(e) = state_machine.apply_block(&block) {
+                            tracing::warn!("Failed to apply synced block to state machine: {}", e);
+                            drop(state_machine);
+                            continue;
+                        }
+
+                        // Persist block and updated state to storage
+                        let storage = storage_clone.lock().await;
+                        if let Err(e) = storage.commit_block(&block, &state_machine.world_state) {
+                            tracing::error!("Failed to commit synced block to storage: {}", e);
+                            drop(storage);
+                            drop(state_machine);
+                            continue;
+                        }
+                        drop(storage);
+                        drop(state_machine);
+
+                        tracing::info!("Successfully synced and committed block: height {}", block.header.block_number.0);
+                    }
+                }
+                NetworkMessage::SyncResponseNoBlocks => {
+                    tracing::info!("Received SyncResponseNoBlocks - peer has no blocks to send");
+                    // Handle case where peer doesn't have the requested blocks
+                }
             }
         }
     });
 
-    // 11. Block production task - only runs if this node is a validator
+    // 12. Block production task - only runs if this node is a validator
     let mempool_producer = mempool.clone();
     let consensus_producer = consensus_engine.clone();
     let state_producer = state_machine.clone();

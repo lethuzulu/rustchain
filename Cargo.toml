@@ -25,7 +25,8 @@ libp2p = { version = "0.55", features = [
     "noise",
     # "dns",         # Temporarily disabled due to hickory-resolver feature issues
     "tcp",         # TCP transport
-    "mdns"         # mDNS for peer discovery
+    "mdns",        # mDNS for peer discovery
+    "request-response"  # For sync protocol
 ] }
 
 
