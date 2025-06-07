@@ -229,6 +229,8 @@ This implementation demonstrates mastery of:
 - [Design Decisions](docs/DESIGN_DECISIONS.md)
 
 ### **For Users**
+- [CLI Reference Guide](docs/CLI_REFERENCE.md)
+- [Performance Benchmarks](docs/PERFORMANCE_BENCHMARKS.md)
 - [Node Configuration](config.toml)
 - [Development Setup](dev/)
 - [Manual Testing Checklist](dev/MANUAL_TESTING_CHECKLIST.md)
