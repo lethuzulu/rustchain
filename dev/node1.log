@@ -5513,3 +5513,17 @@ warning: `rustchain` (bin "rustchain") generated 11 warnings (run `cargo fix --b
 [2m2025-06-07T13:39:13.824909Z[0m [32m INFO[0m [2mrustchain[0m[2m:[0m Produced new block: height 752, txs 0, hash d986a896fd1dbee6358ca971ea300649e74ec4e42fa8b9e45345c41fb1223f6b
 [2m2025-06-07T13:39:13.825159Z[0m [32m INFO[0m [2mrustchain[0m[2m:[0m Successfully sent block broadcast command to network
 [2m2025-06-07T13:39:13.825664Z[0m [32m INFO[0m [2mrustchain::networking[0m[2m:[0m Broadcasted block to network
+[2m2025-06-07T13:39:16.824974Z[0m [32m INFO[0m [2mrustchain[0m[2m:[0m Block production timer tick
+[2m2025-06-07T13:39:16.825137Z[0m [32m INFO[0m [2mrustchain::consensus[0m[2m:[0m get_proposer for height 753: index 0, address 68e8dfa9999a7d1de46d9ddbae29ebdca13fba0f8011661976e62bb69c133fb2
+[2m2025-06-07T13:39:16.825159Z[0m [32m INFO[0m [2mrustchain[0m[2m:[0m Our turn to propose block at height 753
+[2m2025-06-07T13:39:16.825181Z[0m [32m INFO[0m [2mrustchain[0m[2m:[0m Collected 0 transactions for new block
+[2m2025-06-07T13:39:16.825604Z[0m [32m INFO[0m [2mrustchain[0m[2m:[0m Produced new block: height 753, txs 0, hash d73fe95b65266d5a343604f7efcf57b194634c42b83c146b7a56a25bb60ebd6c
+[2m2025-06-07T13:39:16.825870Z[0m [32m INFO[0m [2mrustchain[0m[2m:[0m Successfully sent block broadcast command to network
+[2m2025-06-07T13:39:16.826355Z[0m [32m INFO[0m [2mrustchain::networking[0m[2m:[0m Broadcasted block to network
+[2m2025-06-07T13:39:19.825129Z[0m [32m INFO[0m [2mrustchain[0m[2m:[0m Block production timer tick
+[2m2025-06-07T13:39:19.825305Z[0m [32m INFO[0m [2mrustchain::consensus[0m[2m:[0m get_proposer for height 754: index 0, address 68e8dfa9999a7d1de46d9ddbae29ebdca13fba0f8011661976e62bb69c133fb2
+[2m2025-06-07T13:39:19.825332Z[0m [32m INFO[0m [2mrustchain[0m[2m:[0m Our turn to propose block at height 754
+[2m2025-06-07T13:39:19.825354Z[0m [32m INFO[0m [2mrustchain[0m[2m:[0m Collected 0 transactions for new block
+[2m2025-06-07T13:39:19.825845Z[0m [32m INFO[0m [2mrustchain[0m[2m:[0m Produced new block: height 754, txs 0, hash 214c8668e6986d0603cf75b961adf7df0a7cb15de84db53eef51d401e147cedc
+[2m2025-06-07T13:39:19.826163Z[0m [32m INFO[0m [2mrustchain[0m[2m:[0m Successfully sent block broadcast command to network
+[2m2025-06-07T13:39:19.826669Z[0m [32m INFO[0m [2mrustchain::networking[0m[2m:[0m Broadcasted block to network
