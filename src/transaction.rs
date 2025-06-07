@@ -1,13 +1,15 @@
 use serde::{Serialize, Deserialize};
 use crate::types::{Address, Signature, Nonce, Hash, PublicKey};
-use bincode::{Encode, config};
+use bincode::{Encode, Decode};
 use sha2::{Sha256, Digest};
-use anyhow::Context; // For context on errors if needed
+use anyhow::{Result, Context}; // For context on errors if needed
 use thiserror::Error; // Using thiserror for convenience
+use ed25519_dalek;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Encode)]
+/// A transaction in the blockchain.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Encode, Decode)]
 pub struct Transaction {
-    pub sender: Address, // Should ideally be derived from the PublicKey that signed, or PublicKey itself
+    pub sender: PublicKey,
     pub recipient: Address,
     pub amount: u64,
     pub nonce: Nonce,
@@ -28,20 +30,19 @@ pub enum TxValidationError {
     // Add more stateless validation errors here if needed (e.g., amount is zero)
 }
 
-// Internal struct for canonical serialization for signing
-#[derive(Serialize, Encode)] // Serde for bincode, bincode::Encode for bincode 2.x
+/// A subset of transaction fields that are signed over.
+#[derive(Serialize, Encode)]
 struct TransactionSignablePayload<'a> {
-    sender: &'a Address, // Or PublicKey if sender field in Tx becomes PublicKey
+    sender: &'a PublicKey,
     recipient: &'a Address,
     amount: u64,
-    nonce: &'a Nonce,
+    nonce: Nonce,
 }
 
 impl Transaction {
     /// Creates a new transaction.
     /// The signature is typically added after creation by the sender.
-    /// The hash would also be computed after all fields are set.
-    pub fn new(sender: Address, recipient: Address, amount: u64, nonce: Nonce, signature: Signature) -> Self {
+    pub fn new(sender: PublicKey, recipient: Address, amount: u64, nonce: Nonce, signature: Signature) -> Self {
         Transaction {
             sender,
             recipient,
@@ -51,35 +52,50 @@ impl Transaction {
         }
     }
 
-    /// Calculates the hash of the transaction data that is meant to be signed.
-    /// This typically excludes the signature itself.
-    pub fn data_to_sign_hash(&self) -> anyhow::Result<Hash> {
+    /// Hashes the signable payload of the transaction.
+    pub fn id(&self) -> Result<Hash, bincode::error::EncodeError> {
         let payload = TransactionSignablePayload {
             sender: &self.sender,
             recipient: &self.recipient,
             amount: self.amount,
-            nonce: &self.nonce,
+            nonce: self.nonce,
         };
-        let bincode_config = config::standard();
-        let serialized_payload = bincode::encode_to_vec(&payload, bincode_config)
-            .map_err(|e| TxValidationError::SerializationError(e.to_string()))
-            .context("Failed to serialize transaction payload for signing hash")?;
+        let bincode_config = bincode::config::standard();
+        let serialized_payload = bincode::encode_to_vec(&payload, bincode_config)?;
+        
+        let mut hasher = Sha256::new();
+        hasher.update(&serialized_payload);
+        let result = hasher.finalize();
+        Ok(Hash(result.into()))
+    }
+
+    /// Verifies the transaction's signature.
+    pub fn verify_signature(&self, sender_public_key: &PublicKey) -> Result<(), anyhow::Error> {
+        let message_hash = self.id()?;
+        let signature_bytes: &[u8; 64] = self.signature.0.as_slice().try_into()
+            .map_err(|_| anyhow::anyhow!("Invalid signature format"))?;
+        
+        let dalek_signature = ed25519_dalek::Signature::from_bytes(signature_bytes);
+
+        sender_public_key.0.verify_strict(message_hash.as_ref(), &dalek_signature)
+            .context("Signature verification failed")
+    }
+
+    /// Calculates the hash of the transaction data that is meant to be signed.
+    /// This typically excludes the signature itself.
+    pub fn data_to_sign_hash(&self) -> Result<Hash, bincode::error::EncodeError> {
+        let payload = TransactionSignablePayload {
+            sender: &self.sender,
+            recipient: &self.recipient,
+            amount: self.amount,
+            nonce: self.nonce,
+        };
+        let bincode_config = bincode::config::standard();
+        let serialized_payload = bincode::encode_to_vec(&payload, bincode_config)?;
 
         let mut hasher = Sha256::new();
         hasher.update(&serialized_payload);
         Ok(Hash(hasher.finalize().into()))
-    }
-
-    /// Verifies the transaction's signature against the sender's public key.
-    /// Assumes the `sender` field in the transaction can be used to retrieve/identify the public key.
-    /// For now, it takes PublicKey directly.
-    pub fn verify_signature(&self, sender_public_key: &PublicKey) -> Result<(), TxValidationError> {
-        let message_hash = self.data_to_sign_hash().map_err(|e| 
-            TxValidationError::SerializationError(format!("Hashing for signature verification failed: {}", e))
-        )?;
-        
-        sender_public_key.0.verify_strict(message_hash.as_ref(), &self.signature.0)
-            .map_err(|_| TxValidationError::InvalidSignature)
     }
 
     /// Performs intrinsic property validation checks on the transaction.
@@ -97,21 +113,11 @@ impl Transaction {
     }
 
     /// Performs comprehensive stateless validation: intrinsic properties and signature verification.
-    /// Does NOT check against world state (use StateMachine for that).
+    /// This combines stateless (`validate_intrinsic_properties`) and stateful-like (`verify_signature`) checks.
     pub fn validate(&self, sender_public_key: &PublicKey) -> Result<(), TxValidationError> {
         self.validate_intrinsic_properties()?;
         self.verify_signature(sender_public_key)
-    }
-
-    /// Calculates the unique ID (hash) of the entire transaction, including the signature.
-    pub fn id(&self) -> anyhow::Result<Hash> {
-        let bincode_config = config::standard();
-        let serialized_tx = bincode::encode_to_vec(self, bincode_config)
-            .context("Failed to serialize full transaction for ID hashing")?;
-        
-        let mut hasher = Sha256::new();
-        hasher.update(&serialized_tx);
-        Ok(Hash(hasher.finalize().into()))
+            .map_err(|_e| TxValidationError::InvalidSignature)
     }
 }
 
@@ -141,7 +147,7 @@ mod tests {
 
         fn sign_data_hash(&self, data_hash: &TypesHash) -> TypesSignature {
             let dalek_sig = self.signing_key.sign(data_hash.as_ref());
-            TypesSignature(dalek_sig)
+            TypesSignature(dalek_sig.to_bytes().to_vec())
         }
     }
 
@@ -154,12 +160,12 @@ mod tests {
 
         // Create the data to be signed
         let signable_payload = TransactionSignablePayload {
-            sender: &sender_wallet.address,
+            sender: &sender_wallet.public_key,
             recipient: &recipient_address,
             amount,
-            nonce: &nonce_val,
+            nonce: nonce_val,
         };
-        let bincode_config = config::standard();
+        let bincode_config = bincode::config::standard();
         let serialized_payload = bincode::encode_to_vec(&signable_payload, bincode_config)?;
         let mut hasher = Sha256::new();
         hasher.update(&serialized_payload);
@@ -170,7 +176,7 @@ mod tests {
 
         // Create the transaction
         let tx = Transaction::new(
-            sender_wallet.address,
+            sender_wallet.public_key,
             recipient_address,
             amount,
             nonce_val,
@@ -206,8 +212,8 @@ mod tests {
         let nonce = TypesNonce(2);
         let signature = sender_wallet.sign_data_hash(&TypesHash([0u8; 32])); // Dummy signature for this test
         
-        let tx1 = Transaction::new(sender_wallet.address, recipient_address, amount, nonce, signature);
-        let tx1_again = Transaction::new(sender_wallet.address, recipient_address, amount, nonce, signature);
+        let tx1 = Transaction::new(sender_wallet.public_key, recipient_address, amount, nonce, signature.clone());
+        let tx1_again = Transaction::new(sender_wallet.public_key, recipient_address, amount, nonce, signature);
 
         assert_eq!(tx1.id()?, tx1_again.id()?, "Transaction ID should be consistent for identical transactions");
 
@@ -225,7 +231,7 @@ mod tests {
 
         // Valid transaction (intrinsic properties perspective)
         let tx_valid_props = Transaction::new(
-            sender_wallet.address,
+            sender_wallet.public_key,
             recipient_address,
             100,
             TypesNonce(1),
@@ -235,7 +241,7 @@ mod tests {
 
         // Transaction with zero amount
         let tx_zero_amount = Transaction::new(
-            sender_wallet.address,
+            sender_wallet.public_key,
             recipient_address,
             0, // Zero amount
             TypesNonce(1),
@@ -248,16 +254,16 @@ mod tests {
         let valid_signature = sender_wallet.sign_data_hash(&data_hash_for_valid_sig);
 
         let tx_fully_valid = Transaction::new(
-            sender_wallet.address,
+            sender_wallet.public_key,
             recipient_address,
             100,
             TypesNonce(1),
-            valid_signature
+            valid_signature.clone()
         );
         assert!(tx_fully_valid.validate(&sender_wallet.public_key).is_ok(), "Full validation failed for valid tx");
 
         let tx_bad_sig = Transaction::new(
-            sender_wallet.address,
+            sender_wallet.public_key,
             recipient_address,
             100,
             TypesNonce(1),
@@ -266,7 +272,7 @@ mod tests {
         assert_eq!(tx_bad_sig.validate(&sender_wallet.public_key), Err(TxValidationError::InvalidSignature), "Full validation should fail for bad signature");
 
         let tx_zero_amount_full_val = Transaction::new(
-            sender_wallet.address,
+            sender_wallet.public_key,
             recipient_address,
             0, 
             TypesNonce(1),

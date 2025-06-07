@@ -19,7 +19,7 @@ use std::hash::{Hash, Hasher};
 use std::time::Duration;
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
-use libp2p::multihash::Multihash; // Added import for Multihash
+use bincode::{Encode, Decode};
 
 pub use libp2p::PeerId as Libp2pPeerId;
 
@@ -44,7 +44,7 @@ impl Default for NetworkConfig {
 }
 
 /// Messages that nodes can send to each other over the network.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
 pub enum NetworkMessage {
     NewTransaction(Transaction),
     NewBlock(Block),
@@ -246,7 +246,7 @@ impl NetworkService {
                             message,
                         })) => {
                             let bincode_cfg = bincode::config::standard();
-                            match bincode::serde::decode_from_slice(&message.data, bincode_cfg) { 
+                            match bincode::decode_from_slice(&message.data, bincode_cfg) { 
                                 Ok((network_message, _len)) => { 
                                     if let Err(e) = self.incoming_message_sender.send(network_message).await {
                                         error!("Failed to send incoming message to handler: {}", e);
@@ -310,7 +310,7 @@ impl NetworkService {
                         }
                         NetworkCommand::BroadcastMessage { topic, message } => {
                             let bincode_cfg = bincode::config::standard();
-                            match bincode::serde::encode_to_vec(&message, bincode_cfg) {
+                            match bincode::encode_to_vec(&message, bincode_cfg) {
                                 Ok(encoded_message) => {
                                     if let Err(e) = self.swarm.behaviour_mut().gossipsub.publish(topic, encoded_message) {
                                         error!("Failed to publish gossipsub message: {:?}", e);
@@ -334,9 +334,9 @@ impl NetworkService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use libp2p::multihash::Multihash;
     use tokio::time::sleep;
-    use crate::types::{Address, BlockHeight, Nonce, Signature as TypesSignature, Timestamp};
-    use ed25519_dalek::Signature as Ed25519Signature;
+    use crate::types::{Address, BlockHeight, Nonce, PublicKey, Signature as TypesSignature, Timestamp};
 
     fn generate_keypair() -> identity::Keypair {
         identity::Keypair::generate_ed25519()
@@ -379,29 +379,29 @@ mod tests {
 
         let recipient_address = Address([1u8; 32]);
 
-        let signature_bytes = keypair.sign(b"test_tx_data").expect("Signing failed");
-        let dalek_signature = Ed25519Signature::from_bytes(
-            signature_bytes
-                .as_slice()
-                .try_into()
-                .expect("Signature should be 64 bytes"),
-        );
+        // Extract Ed25519 public key from libp2p keypair
+        let ed25519_public_key = match keypair.public().try_into_ed25519() {
+            Ok(pk) => ed25519_dalek::VerifyingKey::from_bytes(&pk.to_bytes())
+                .expect("Failed to convert libp2p Ed25519 public key to dalek VerifyingKey"),
+            Err(_) => panic!("Test requires Ed25519 keypair"),
+        };
 
+        let signature_bytes: Vec<u8> = keypair.sign(b"test_tx_data").expect("Signing failed").to_vec();
 
         let transaction = Transaction {
-            sender: sender_address,
+            sender: PublicKey(ed25519_public_key),
             recipient: recipient_address,
             amount: 100,
             nonce: Nonce(1),
-            signature: TypesSignature(dalek_signature),
+            signature: crate::types::Signature(signature_bytes),
         };
         let network_msg_tx = NetworkMessage::NewTransaction(transaction.clone());
 
         let bincode_cfg = bincode::config::standard();
-        let serialized_tx = bincode::serde::encode_to_vec(&network_msg_tx, bincode_cfg)
+        let serialized_tx = bincode::encode_to_vec(&network_msg_tx, bincode_cfg)
             .expect("Failed to serialize transaction message");
         let (deserialized_tx, _len): (NetworkMessage, usize) =
-            bincode::serde::decode_from_slice(&serialized_tx, bincode_cfg)
+            bincode::decode_from_slice(&serialized_tx, bincode_cfg)
                 .expect("Failed to deserialize transaction message");
 
         match deserialized_tx {
@@ -409,14 +409,7 @@ mod tests {
             _ => panic!("Deserialized to wrong message type"),
         }
 
-        let block_signature_bytes = keypair.sign(b"test_block_data").expect("Signing failed");
-        let block_dalek_signature = Ed25519Signature::from_bytes(
-            block_signature_bytes
-                .as_slice()
-                .try_into()
-                .expect("Signature should be 64 bytes"),
-        );
-
+        let block_signature_bytes: Vec<u8> = keypair.sign(b"test_block_data").expect("Signing failed").to_vec();
 
         let block_header = crate::block::BlockHeader {
             parent_hash: crate::types::Hash([0u8; 32]),
@@ -424,17 +417,17 @@ mod tests {
             timestamp: Timestamp(0),
             tx_root: crate::types::Hash([1u8; 32]),
             validator: sender_address,
-            signature: TypesSignature(block_dalek_signature),
+            signature: crate::types::Signature(block_signature_bytes),
         };
         let block = Block {
             header: block_header,
             transactions: vec![transaction.clone()],
         };
         let network_msg_block = NetworkMessage::NewBlock(block.clone());
-        let serialized_block = bincode::serde::encode_to_vec(&network_msg_block, bincode_cfg)
+        let serialized_block = bincode::encode_to_vec(&network_msg_block, bincode_cfg)
             .expect("Failed to serialize block message");
         let (deserialized_block, _len): (NetworkMessage, usize) =
-            bincode::serde::decode_from_slice(&serialized_block, bincode_cfg)
+            bincode::decode_from_slice(&serialized_block, bincode_cfg)
                 .expect("Failed to deserialize block message");
 
         match deserialized_block {

@@ -1,7 +1,8 @@
 use crate::block::{Block, BlockHeader};
-use crate::types::{address_from_public_key, Address, BlockHeight, Hash, PublicKey};
+use crate::types::{address_from_public_key, Address, BlockHeight, PublicKey};
 use ed25519_dalek::Verifier;
 use thiserror::Error;
+use bincode::error::EncodeError;
 
 #[derive(Debug, Error)]
 pub enum ConsensusError {
@@ -20,6 +21,10 @@ pub enum ConsensusError {
     GenesisBlockUndefined,
     #[error("Internal consensus error: {0}")]
     InternalError(String),
+    #[error("Invalid signature format")]
+    InvalidSignatureFormat,
+    #[error("Bincode error: {0}")]
+    BincodeError(#[from] EncodeError),
 }
 
 /// The consensus engine for the blockchain.
@@ -91,19 +96,19 @@ impl ConsensusEngine {
         let proposer_pk = self
             .get_proposer_pk_for_address(&block.header.validator)
             .ok_or(ConsensusError::ProposerNotInValidatorSet)?;
-        let header_hash = block
-            .header
-            .calculate_hash()
-            .map_err(|e| ConsensusError::InternalError(e.to_string()))?;
-        if proposer_pk
-            .0
-            .verify(&header_hash.0, &block.header.signature.0)
-            .is_err()
-        {
-            return Err(ConsensusError::InvalidSignature);
-        }
+        let header_hash = block.header.calculate_hash()?;
+        
+        // The public key of the validator is in block.header.validator
+        // The signature is in block.header.signature
+        // The data that was signed is the header_hash
+        
+        let signature_bytes: &[u8; 64] = block.header.signature.0.as_slice().try_into()
+            .map_err(|_| ConsensusError::InvalidSignatureFormat)?;
 
-        Ok(())
+        let dalek_signature = ed25519_dalek::Signature::from_bytes(signature_bytes);
+
+        proposer_pk.0.verify(&header_hash.0, &dalek_signature)
+            .map_err(|_| ConsensusError::InvalidSignature)
     }
 
     /// Finds the public key for a given validator address.
@@ -118,9 +123,8 @@ impl ConsensusEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::block::Block;
-    use crate::transaction::Transaction;
-    use crate::types::{Nonce, Signature as TypesSignature};
+    use crate::wallet::Wallet;
+    use crate::types::{Address, BlockHeight, Hash, Nonce, Signature, Timestamp};
     use ed25519_dalek::{Signer, SigningKey};
     use rand::rngs::OsRng;
 
@@ -165,7 +169,7 @@ mod tests {
             timestamp: crate::types::Timestamp(0),
             tx_root: Hash([0; 32]),
             validator: address_from_public_key(&pk1),
-            signature: TypesSignature(sk1.sign(&[])),
+            signature: Signature(sk1.sign(&[]).to_bytes().to_vec()),
         };
 
         assert!(consensus_engine.validate_proposer(&block_header).is_ok());
@@ -188,7 +192,7 @@ mod tests {
             timestamp: crate::types::Timestamp(0),
             tx_root: Hash([0; 32]),
             validator: address_from_public_key(&pk1),
-            signature: TypesSignature(sk1.sign(&[])),
+            signature: Signature(sk1.sign(&[]).to_bytes().to_vec()),
         };
 
         let mut header2 = header1.clone();
@@ -234,11 +238,11 @@ mod tests {
             timestamp: crate::types::Timestamp(0),
             tx_root: Hash([0; 32]),
             validator: validator_address,
-            signature: TypesSignature(sk1.sign(&[])), // dummy signature
+            signature: Signature(sk1.sign(&[]).to_bytes().to_vec()), // dummy signature
         };
 
         let header_hash = block_header.calculate_hash().unwrap();
-        block_header.signature = TypesSignature(sk1.sign(&header_hash.0));
+        block_header.signature = Signature(sk1.sign(&header_hash.0).to_bytes().to_vec());
 
         let block = Block {
             header: block_header.clone(),
@@ -250,12 +254,69 @@ mod tests {
         // invalid signature
         let (sk_bad, _) = generate_test_keypair();
         let mut bad_block = block.clone();
-        bad_block.header.signature = TypesSignature(sk_bad.sign(&header_hash.0));
+        bad_block.header.signature = Signature(sk_bad.sign(&header_hash.0).to_bytes().to_vec());
         assert!(consensus_engine.validate_block(&bad_block).is_err());
 
         // invalid proposer
         let mut bad_block = block.clone();
         bad_block.header.block_number = BlockHeight(1);
         assert!(consensus_engine.validate_block(&bad_block).is_err());
+    }
+
+    #[test]
+    fn test_validate_block_wrong_proposer() {
+        let sender_wallet = Wallet::new();
+        let other_wallet = Wallet::new();
+        let recipient_address = Address([2u8; 32]);
+        let amount = 100;
+        let nonce = Nonce(1);
+
+        let transaction = sender_wallet.create_signed_transaction(recipient_address, amount, nonce).unwrap();
+
+        let block = Block {
+            header: BlockHeader {
+                parent_hash: Hash([0u8; 32]),
+                block_number: BlockHeight(1),
+                timestamp: Timestamp(1234567890),
+                tx_root: Hash([1u8; 32]),
+                validator: address_from_public_key(other_wallet.public_key()), // block signed by other wallet
+                signature: transaction.signature.clone(),
+            },
+            transactions: vec![transaction],
+        };
+
+        let validators = vec![*sender_wallet.public_key()];
+        let consensus_engine = ConsensusEngine::new(validators);
+
+        let result = consensus_engine.validate_block(&block);
+        assert!(matches!(result, Err(ConsensusError::ProposerNotInValidatorSet)));
+    }
+
+    #[test]
+    fn test_validate_block_invalid_signature() {
+        let sender_wallet = Wallet::new();
+        let recipient_address = Address([2u8; 32]);
+        let amount = 100;
+        let nonce = Nonce(1);
+
+        let transaction = sender_wallet.create_signed_transaction(recipient_address, amount, nonce).unwrap();
+
+        let block = Block {
+            header: BlockHeader {
+                parent_hash: Hash([0u8; 32]),
+                block_number: BlockHeight(1),
+                timestamp: Timestamp(1234567890),
+                tx_root: Hash([1u8; 32]),
+                validator: address_from_public_key(sender_wallet.public_key()),
+                signature: Signature(vec![0; 64]), // Invalid signature
+            },
+            transactions: vec![transaction],
+        };
+
+        let validators = vec![*sender_wallet.public_key()];
+        let consensus_engine = ConsensusEngine::new(validators);
+
+        let result = consensus_engine.validate_block(&block);
+        assert!(matches!(result, Err(ConsensusError::InvalidSignature)));
     }
 }

@@ -1,9 +1,8 @@
 use crate::transaction::Transaction;
 use crate::types::{Address, BlockHeight, Hash, Signature, Timestamp};
 use serde::{Deserialize, Serialize};
-use bincode::{Encode, config}; // For bincode 2.x specific encode/decode if needed directly
+use bincode::{self, Encode, Decode};
 use sha2::{Sha256, Digest};
-use anyhow::Context; // For context on errors if needed
 use thiserror::Error; // For custom errors
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -21,7 +20,7 @@ pub enum BlockValidationError {
 }
 
 /// Represents the header of a block in the blockchain.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Encode)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Encode, Decode)]
 pub struct BlockHeader {
     pub parent_hash: Hash,          // Hash of the previous block's header
     pub block_number: BlockHeight,
@@ -47,28 +46,24 @@ impl BlockHeader {
     /// Calculates the hash of the block header data that is meant to be signed by the validator
     /// and also serves as the block's unique ID (often called block hash).
     /// This typically excludes the signature itself.
-    pub fn calculate_hash(&self) -> Result<Hash, BlockValidationError> {
-        let payload = BlockHeaderSignablePayload {
-            parent_hash: &self.parent_hash,
-            block_number: self.block_number, // BlockHeight is Copy
-            timestamp: self.timestamp,       // Timestamp is Copy
-            tx_root: &self.tx_root,
-            validator: &self.validator,
-        };
-        let bincode_config = config::standard();
-        let serialized_payload = bincode::encode_to_vec(&payload, bincode_config)
-            .map_err(|e| BlockValidationError::SerializationError(e.to_string()))
-            .context("Failed to serialize block header payload for hashing")
-            .map_err(|e| BlockValidationError::HashCalculationError(e.to_string()))?;
-
+    pub fn calculate_hash(&self) -> Result<Hash, bincode::error::EncodeError> {
+        let mut header_clone_for_hashing = self.clone();
+        // The signature must be empty when hashing to get the hash that was signed.
+        header_clone_for_hashing.signature = Signature(vec![]); 
+        
+        // Using bincode for serialization before hashing
+        let config = bincode::config::standard();
+        let encoded = bincode::encode_to_vec(&header_clone_for_hashing, config)?;
+        
         let mut hasher = Sha256::new();
-        hasher.update(&serialized_payload);
-        Ok(Hash(hasher.finalize().into()))
+        hasher.update(&encoded);
+        let result = hasher.finalize();
+        Ok(Hash(result.into()))
     }
 }
 
 /// Represents a block in the blockchain, containing a header and a list of transactions.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Encode)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Encode, Decode)]
 pub struct Block {
     pub header: BlockHeader,
     pub transactions: Vec<Transaction>,
@@ -200,18 +195,18 @@ mod tests {
         let recipient_address = Address([1u8; 32]);
 
         let tx_for_hash_calc = Transaction {
-            sender: sender_address,
+            sender: sender_pk,
             recipient: recipient_address,
             amount,
             nonce: Nonce(nonce_val),
-            signature: TypesSignature(signing_key.sign(&[salt])),
+            signature: TypesSignature(signing_key.sign(&[salt]).to_bytes().to_vec()),
         };
         let data_hash = tx_for_hash_calc.data_to_sign_hash().expect("Data hash failed in dummy tx for block test");
-        let final_signature = TypesSignature(signing_key.sign(data_hash.as_ref()));
+        let final_signature = TypesSignature(signing_key.sign(data_hash.as_ref()).to_bytes().to_vec());
 
         (
             Transaction {
-                sender: sender_address,
+                sender: sender_pk,
                 recipient: recipient_address,
                 amount,
                 nonce: Nonce(nonce_val),
@@ -224,7 +219,7 @@ mod tests {
     fn dummy_signature() -> TypesSignature {
         let mut csprng = OsRng;
         let signing_key = SigningKey::generate(&mut csprng);
-        TypesSignature(signing_key.sign(b"dummy_block_header_data"))
+        TypesSignature(signing_key.sign(b"dummy_block_header_data").to_bytes().to_vec())
     }
 
     #[test]
@@ -316,10 +311,10 @@ mod tests {
             signature: dummy_signature(),
         };
         let header2 = header1.clone();
-        assert_eq!(header1.calculate_hash()?, header2.calculate_hash()?);
+        assert_eq!(header1.calculate_hash().unwrap(), header2.calculate_hash().unwrap());
         let mut header3 = header1.clone();
         header3.timestamp = Timestamp(101);
-        assert_ne!(header1.calculate_hash()?, header3.calculate_hash()?);
+        assert_ne!(header1.calculate_hash().unwrap(), header3.calculate_hash().unwrap());
         Ok(())
     }
 
@@ -342,10 +337,10 @@ mod tests {
             validator: validator_addr,
             signature: dummy_signature(),
         };
-        let header_hash_to_sign = header_payload_for_signing.calculate_hash()?;
+        let header_hash_to_sign = header_payload_for_signing.calculate_hash().unwrap();
         let mut csprng = OsRng;
         let signing_key = SigningKey::generate(&mut csprng);
-        let validator_signature = TypesSignature(signing_key.sign(header_hash_to_sign.as_ref()));
+        let validator_signature = TypesSignature(signing_key.sign(header_hash_to_sign.as_ref()).to_bytes().to_vec());
 
         let block = Block::new(
             parent_hash, block_number, timestamp, validator_addr, 

@@ -196,24 +196,23 @@ mod tests {
         let signing_key = SigningKey::generate(&mut csprng);
         let verifying_key = signing_key.verifying_key();
         let sender_pk = PublicKey(verifying_key);
-        let sender_address = Address(*verifying_key.as_bytes()); // Simple address from PK bytes
         let recipient_address = Address([1u8; 32]); // Dummy recipient
 
         let tx_to_sign = Transaction {
-            sender: sender_address,
+            sender: sender_pk,
             recipient: recipient_address,
             amount,
             nonce: Nonce(nonce_val),
-            signature: TypesSignature(signing_key.sign(&[])), // Dummy signature, will be replaced
+            signature: TypesSignature(signing_key.sign(&[]).to_bytes().to_vec()), // Dummy signature, will be replaced
         };
 
         // Calculate data_to_sign_hash
         let data_hash = tx_to_sign.data_to_sign_hash().expect("Failed to hash tx for signing");
-        let signature = TypesSignature(signing_key.sign(data_hash.as_ref()));
+        let signature = TypesSignature(signing_key.sign(data_hash.as_ref()).to_bytes().to_vec());
 
         (
             Transaction {
-                sender: sender_address,
+                sender: sender_pk,
                 recipient: recipient_address,
                 amount,
                 nonce: Nonce(nonce_val),
