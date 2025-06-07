@@ -1,0 +1,26 @@
+# RustChain Node Configuration File
+
+# Network configuration
+[network]
+listen_port = 9000
+listen_addr = "127.0.0.1"
+bootstrap_peers = []
+max_peers = 50
+
+# Storage configuration
+[storage]
+db_path = "rustchain_db"
+create_if_missing = true
+
+# Consensus configuration
+[consensus]
+block_interval = 5
+max_txs_per_block = 10
+
+# Validator configuration (optional)
+# [validator]
+# enabled = true
+# private_key_path = "validator.key"
+
+# Genesis file path (optional)
+# genesis_file = "genesis.json" 

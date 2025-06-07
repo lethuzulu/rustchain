@@ -1,0 +1,13 @@
+{
+  "validators": [
+    "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  ],
+  "initial_balances": {
+    "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a": 1000000,
+    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855": 500000,
+    "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef": 250000
+  },
+  "timestamp": 1640995200,
+  "message": "RustChain Genesis Block - Development Network"
+} 
