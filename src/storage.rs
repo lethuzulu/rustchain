@@ -1,6 +1,6 @@
 use crate::block::Block;
 use crate::state_machine::{Account, WorldState};
-use crate::types::{Address, Hash};
+use crate::types::{Address, Hash, BlockHeight};
 use rocksdb::{DB, Options, WriteBatch};
 use std::path::Path;
 use thiserror::Error;
@@ -11,6 +11,7 @@ const STATE_CF: &str = "state";
 const META_CF: &str = "meta";
 
 const TIP_KEY: &[u8] = b"tip";
+const HEIGHT_KEY: &[u8] = b"height";
 
 #[derive(Debug, Error)]
 pub enum StorageError {
@@ -83,6 +84,44 @@ impl Storage {
         self.db.put_cf(cf, TIP_KEY, bytes)?;
         Ok(())
     }
+
+    pub fn get_chain_tip(&self) -> Result<Option<(Hash, u64)>, StorageError> {
+        let cf = self.get_cf(META_CF)?;
+        
+        // Get the tip hash
+        let tip_result = self.db.get_cf(cf, TIP_KEY)?;
+        let tip_hash = match tip_result {
+            Some(bytes) => bincode::decode_from_slice(&bytes, bincode::config::standard())
+                .map(|(hash, _)| hash)
+                .map_err(|e| StorageError::DeserializationError(e.to_string()))?,
+            None => return Ok(None),
+        };
+        
+        // Get the height
+        let height_result = self.db.get_cf(cf, HEIGHT_KEY)?;
+        let height = match height_result {
+            Some(bytes) => bincode::decode_from_slice::<u64, _>(&bytes, bincode::config::standard())
+                .map(|(height, _)| height)
+                .map_err(|e| StorageError::DeserializationError(e.to_string()))?,
+            None => return Ok(None),
+        };
+        
+        Ok(Some((tip_hash, height)))
+    }
+
+    fn put_chain_tip(&self, hash: &Hash, height: u64) -> Result<(), StorageError> {
+        let cf = self.get_cf(META_CF)?;
+        
+        let hash_bytes = bincode::encode_to_vec(hash, bincode::config::standard())
+            .map_err(|e| StorageError::SerializationError(e.to_string()))?;
+        self.db.put_cf(cf, TIP_KEY, hash_bytes)?;
+        
+        let height_bytes = bincode::encode_to_vec(&height, bincode::config::standard())
+            .map_err(|e| StorageError::SerializationError(e.to_string()))?;
+        self.db.put_cf(cf, HEIGHT_KEY, height_bytes)?;
+        
+        Ok(())
+    }
     
     pub fn commit_block(&self, block: &Block, world_state: &WorldState) -> Result<(), StorageError> {
         let mut batch = WriteBatch::default();
@@ -99,8 +138,12 @@ impl Storage {
             batch.put_cf(&state_cf, address.0, account_bytes);
         }
 
+        // Store both tip hash and height
         let tip_bytes = bincode::encode_to_vec(&hash, bincode::config::standard()).map_err(|e| StorageError::SerializationError(e.to_string()))?;
         batch.put_cf(&meta_cf, TIP_KEY, tip_bytes);
+        
+        let height_bytes = bincode::encode_to_vec(&block.header.block_number.0, bincode::config::standard()).map_err(|e| StorageError::SerializationError(e.to_string()))?;
+        batch.put_cf(&meta_cf, HEIGHT_KEY, height_bytes);
 
         self.db.write(batch)?;
 
@@ -112,7 +155,7 @@ impl Storage {
 mod tests {
     use super::*;
     use crate::block::BlockHeader;
-    use crate::types::{Address, BlockHeight, Hash, Nonce, Signature};
+    use crate::types::{Address, Nonce, Signature};
     use tempfile::tempdir;
     
     fn temp_db_path() -> tempfile::TempDir {

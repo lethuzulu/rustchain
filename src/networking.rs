@@ -120,6 +120,8 @@ pub enum NetworkCommand {
         topic: Topic, 
         message: NetworkMessage 
     },
+    BroadcastBlock(Block),
+    BroadcastTransaction(Transaction),
 }
 
 impl NetworkService {
@@ -320,6 +322,38 @@ impl NetworkService {
                                 }
                                 Err(e) => {
                                     error!("Failed to serialize message for broadcast: {:?}", e.to_string());
+                                }
+                            }
+                        }
+                        NetworkCommand::BroadcastBlock(block) => {
+                            let network_message = NetworkMessage::NewBlock(block);
+                            let bincode_cfg = bincode::config::standard();
+                            match bincode::encode_to_vec(&network_message, bincode_cfg) {
+                                Ok(encoded_message) => {
+                                    if let Err(e) = self.swarm.behaviour_mut().gossipsub.publish(self.block_topic.clone(), encoded_message) {
+                                        error!("Failed to publish block: {:?}", e);
+                                    } else {
+                                        info!("Broadcasted block to network");
+                                    }
+                                }
+                                Err(e) => {
+                                    error!("Failed to serialize block for broadcast: {:?}", e.to_string());
+                                }
+                            }
+                        }
+                        NetworkCommand::BroadcastTransaction(transaction) => {
+                            let network_message = NetworkMessage::NewTransaction(transaction);
+                            let bincode_cfg = bincode::config::standard();
+                            match bincode::encode_to_vec(&network_message, bincode_cfg) {
+                                Ok(encoded_message) => {
+                                    if let Err(e) = self.swarm.behaviour_mut().gossipsub.publish(self.transaction_topic.clone(), encoded_message) {
+                                        error!("Failed to publish transaction: {:?}", e);
+                                    } else {
+                                        info!("Broadcasted transaction to network");
+                                    }
+                                }
+                                Err(e) => {
+                                    error!("Failed to serialize transaction for broadcast: {:?}", e.to_string());
                                 }
                             }
                         }

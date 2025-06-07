@@ -16,8 +16,13 @@ mod cli;
 use rustchain::consensus::ConsensusEngine;
 use rustchain::state_machine::StateMachine;
 use rustchain::storage::Storage;
+use rustchain::mempool::{Mempool, MempoolConfig};
+use rustchain::block::{Block, BlockHeader, calculate_merkle_root};
+use rustchain::types::{BlockHeight, Hash, Signature, Timestamp, address_from_public_key};
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
+use ed25519_dalek::Signer;
 
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
@@ -38,10 +43,13 @@ enum Commands {
 
 #[derive(Parser, Debug)]
 struct NodeArgs {
-    // Example: #[clap(long, short, default_value = "/ip4/0.0.0.0/tcp/0")]
-    // pub listen_address: String, // We'll use NetworkConfig::default for now
-    // Example: #[clap(long)]
-    // pub bootstrap_peers: Vec<String>,
+    /// Block production interval in seconds (default: 5)
+    #[clap(long, default_value = "5")]
+    pub block_interval: u64,
+    
+    /// Maximum transactions per block (default: 10)
+    #[clap(long, default_value = "10")]
+    pub max_txs_per_block: usize,
 }
 
 // Helper function to parse Address from hex string
@@ -97,70 +105,262 @@ async fn run_node(node_args: NodeArgs) -> anyhow::Result<()> {
     let state_machine = Arc::new(Mutex::new(StateMachine::new()));
     tracing::info!("StateMachine initialized.");
 
-    // 3. Initialize ConsensusEngine
+    // 3. Initialize Mempool
+    let mempool_config = MempoolConfig::default();
+    let mempool = Arc::new(Mutex::new(Mempool::new(mempool_config)));
+    tracing::info!("Mempool initialized with capacity: {}", mempool_config.max_transactions);
+
+    // 4. Initialize ConsensusEngine and Validator Wallet
     let validator_wallet = rustchain::wallet::Wallet::new();
     let validators = vec![*validator_wallet.public_key()];
     let consensus_engine = Arc::new(Mutex::new(ConsensusEngine::new(validators.clone())));
-    tracing::info!("ConsensusEngine initialized with {} validator(s).", validators.len());
+    tracing::info!(
+        "ConsensusEngine initialized with {} validator(s). Our validator address: {}", 
+        validators.len(),
+        address_from_public_key(validator_wallet.public_key())
+    );
 
-    // 4. Initialize NetworkConfig
+    // 5. Initialize NetworkConfig
     let network_config = NetworkConfig::default();
     tracing::info!("NetworkConfig: {:?}", network_config);
 
-    // 5. Generate Node Identity (Keypair)
+    // 6. Generate Node Identity (Keypair)
     let local_keypair = identity::Keypair::generate_ed25519();
     let local_peer_id = Libp2pPeerId::from(local_keypair.public());
     tracing::info!("Generated local Peer ID: {}", local_peer_id);
 
-    // 6. Create MPSC channel for incoming network messages
+    // 7. Create MPSC channel for incoming network messages
     let (incoming_message_sender, mut incoming_message_receiver) = mpsc::channel::<NetworkMessage>(128);
 
-    // 7. Instantiate NetworkService
+    // 8. Instantiate NetworkService
     tracing::info!("Initializing NetworkService...");
     let (network_service, network_command_sender) = 
         NetworkService::new(network_config.clone(), local_keypair, incoming_message_sender).await
         .map_err(|e| anyhow::anyhow!("Failed to create NetworkService: {}", e))?;
     tracing::info!("NetworkService initialized.");
 
-    // 8. Spawn NetworkService::run() as a Tokio task
+    // Clone network service for block broadcasting
+    let network_service_handle = network_service.command_sender();
+
+    // 9. Spawn NetworkService::run() as a Tokio task
     tokio::spawn(network_service.run());
 
     // Clone Arcs for the message handling task
     let consensus_engine_clone = consensus_engine.clone();
     let state_machine_clone = state_machine.clone();
     let storage_clone = storage.clone();
+    let mempool_clone = mempool.clone();
 
-    // 9. Task to handle incoming messages from the NetworkService
+    // 10. Task to handle incoming messages from the NetworkService
     tokio::spawn(async move {
         tracing::info!("Incoming message handler task started.");
         while let Some(message) = incoming_message_receiver.recv().await {
             match message {
                 NetworkMessage::NewTransaction(tx) => {
                     tracing::info!("Received NewTransaction: {}", tx.id().unwrap());
-                    // TODO: Pass to Mempool
+                    
+                    // Add transaction to mempool
+                    let mut mempool_lock = mempool_clone.lock().await;
+                    match mempool_lock.add_transaction(tx) {
+                        Ok(tx_hash) => {
+                            tracing::info!("Transaction {} added to mempool", tx_hash);
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to add transaction to mempool: {}", e);
+                        }
+                    }
                 }
                 NetworkMessage::NewBlock(block) => {
-                    tracing::info!("Received NewBlock: {}", block.header.block_number);
+                    tracing::info!("Received NewBlock: height {}, hash {}", 
+                        block.header.block_number.0, 
+                        block.header.calculate_hash().unwrap_or_default()
+                    );
 
+                    // Validate block through consensus
                     let consensus_engine = consensus_engine_clone.lock().await;
                     if let Err(e) = consensus_engine.validate_block(&block) {
                         tracing::warn!("Invalid block received: {}", e);
                         continue;
                     }
+                    drop(consensus_engine);
 
+                    // Apply block to state machine
                     let mut state_machine = state_machine_clone.lock().await;
                     if let Err(e) = state_machine.apply_block(&block) {
                         tracing::warn!("Failed to apply block to state machine: {}", e);
                         continue;
                     }
 
+                    // Remove included transactions from mempool
+                    let tx_hashes: Vec<Hash> = block.transactions.iter()
+                        .filter_map(|tx| tx.id().ok())
+                        .collect();
+                    let mut mempool_lock = mempool_clone.lock().await;
+                    mempool_lock.remove_transactions(&tx_hashes);
+                    drop(mempool_lock);
+
+                    // Persist block and updated state to storage
                     let storage = storage_clone.lock().await;
                     if let Err(e) = storage.commit_block(&block, &state_machine.world_state) {
                         tracing::error!("Failed to commit block to storage: {}", e);
+                        continue;
                     }
 
-                    tracing::info!("Successfully processed and committed new block: {}", block.header.block_number);
+                    tracing::info!("Successfully processed and committed new block: height {}", block.header.block_number.0);
                 }
+            }
+        }
+    });
+
+    // 11. Block production task - only runs if this node is a validator
+    let mempool_producer = mempool.clone();
+    let consensus_producer = consensus_engine.clone();
+    let state_producer = state_machine.clone();
+    let storage_producer = storage.clone();
+    let network_sender = network_command_sender.clone();
+    let validator_wallet_clone = validator_wallet;
+
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(node_args.block_interval));
+        
+        loop {
+            interval.tick().await;
+            
+            // Check if it's our turn to propose
+            let current_time = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            
+            // Get current blockchain state
+            let storage_lock = storage_producer.lock().await;
+            let (current_tip_hash, current_height) = match storage_lock.get_chain_tip() {
+                Ok(Some((hash, height))) => (hash, height),
+                Ok(None) => {
+                    // Genesis case - start with height 0
+                    (Hash([0u8; 32]), 0)
+                }
+                Err(e) => {
+                    tracing::error!("Failed to get chain tip: {}", e);
+                    continue;
+                }
+            };
+            drop(storage_lock);
+            
+            let next_height = BlockHeight(current_height + 1);
+            
+            // Check with consensus engine if we should propose
+            let consensus_lock = consensus_producer.lock().await;
+            let expected_proposer = match consensus_lock.get_proposer(next_height) {
+                Ok(proposer) => proposer,
+                Err(e) => {
+                    tracing::debug!("Failed to get proposer for height {}: {}", next_height.0, e);
+                    drop(consensus_lock);
+                    continue;
+                }
+            };
+            
+            let our_address = address_from_public_key(validator_wallet_clone.public_key());
+            let expected_address = address_from_public_key(expected_proposer);
+            
+            if our_address != expected_address {
+                tracing::debug!("Not our turn to propose. Expected: {}, We are: {}", expected_address, our_address);
+                drop(consensus_lock);
+                continue;
+            }
+            drop(consensus_lock);
+            
+            tracing::info!("Our turn to propose block at height {}", next_height.0);
+            
+            // Collect transactions from mempool
+            let mempool_lock = mempool_producer.lock().await;
+            let transactions = mempool_lock.get_pending_transactions(node_args.max_txs_per_block);
+            let num_txs = transactions.len();
+            drop(mempool_lock);
+            
+            tracing::info!("Collected {} transactions for new block", num_txs);
+            
+            // Calculate merkle root
+            let tx_root = match calculate_merkle_root(&transactions) {
+                Ok(root) => root,
+                Err(e) => {
+                    tracing::error!("Failed to calculate merkle root: {}", e);
+                    continue;
+                }
+            };
+            
+            // Create block header (without signature first)
+            let mut block_header = BlockHeader {
+                parent_hash: current_tip_hash,
+                block_number: next_height,
+                timestamp: Timestamp(current_time),
+                tx_root,
+                validator: our_address,
+                signature: Signature(vec![0; 64]), // Placeholder
+            };
+            
+            // Calculate header hash and sign it
+            let header_hash = match block_header.calculate_hash() {
+                Ok(hash) => hash,
+                Err(e) => {
+                    tracing::error!("Failed to calculate header hash: {}", e);
+                    continue;
+                }
+            };
+            
+            let signature = match validator_wallet_clone.sign(header_hash.as_ref()) {
+                Ok(sig) => sig,
+                Err(e) => {
+                    tracing::error!("Failed to sign block header: {}", e);
+                    continue;
+                }
+            };
+            
+            // Update header with real signature
+            block_header.signature = signature;
+            
+            // Create the complete block
+            let new_block = Block {
+                header: block_header,
+                transactions,
+            };
+            
+            tracing::info!("Produced new block: height {}, txs {}, hash {}", 
+                new_block.header.block_number.0,
+                new_block.transactions.len(),
+                new_block.header.calculate_hash().unwrap_or_default()
+            );
+            
+            // Apply block locally first (optimistic)
+            let mut state_lock = state_producer.lock().await;
+            if let Err(e) = state_lock.apply_block(&new_block) {
+                tracing::error!("Failed to apply our own block to state machine: {}", e);
+                continue;
+            }
+            
+            // Remove transactions from mempool
+            let tx_hashes: Vec<Hash> = new_block.transactions.iter()
+                .filter_map(|tx| tx.id().ok())
+                .collect();
+            let mut mempool_lock = mempool_producer.lock().await;
+            mempool_lock.remove_transactions(&tx_hashes);
+            drop(mempool_lock);
+            
+            // Persist the block
+            let storage_lock = storage_producer.lock().await;
+            if let Err(e) = storage_lock.commit_block(&new_block, &state_lock.world_state) {
+                tracing::error!("Failed to commit our own block to storage: {}", e);
+                continue;
+            }
+            drop(storage_lock);
+            drop(state_lock);
+            
+            // Broadcast the block to peers
+            let broadcast_command = rustchain::networking::NetworkCommand::BroadcastBlock(new_block.clone());
+            if let Err(e) = network_sender.send(broadcast_command).await {
+                tracing::error!("Failed to send broadcast block command: {}", e);
+            } else {
+                tracing::info!("Successfully sent block broadcast command to network");
             }
         }
     });
